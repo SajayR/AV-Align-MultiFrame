@@ -32,6 +32,10 @@ class AudioProcessor:
     
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
         """Process audio waveform to mel spectrogram"""
+        #print("\n=== Audio Processing Debug ===")
+        #print(f"1. Initial waveform - shape: {waveform.shape}, min: {waveform.min():.3f}, max: {waveform.max():.3f}")
+        #print(f"   dtype: {waveform.dtype}, device: {waveform.device}")
+        
         # Handle mono audio without channel dim
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
@@ -39,13 +43,27 @@ class AudioProcessor:
         # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        #print(f"2. After mono conversion - shape: {waveform.shape}, min: {waveform.min():.3f}, max: {waveform.max():.3f}")
             
         # Get mel spectrogram
         mel = self.mel_spec(waveform)  # (1, n_mels, time)
+        #print(f"3. After mel spec - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
+        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
         
         # Convert to db units and normalize
         mel = torch.log(mel + 1e-10)
-        mel = (mel - mel.mean()) / (mel.std() * 2)
+        #print(f"4. After log - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
+        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
+        
+        # Check mean and std before normalization
+        mel_mean = mel.mean()
+        mel_std = mel.std()
+        #print(f"5. Before norm - mean: {mel_mean:.3f}, std: {mel_std:.3f}")
+        
+        mel = (mel - mel_mean) / (mel_std * 2)
+        #print(f"6. After normalization - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
+        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
         
         # Handle length
         current_length = mel.shape[2]
@@ -57,9 +75,13 @@ class AudioProcessor:
             repeats = (self.target_length + current_length - 1) // current_length
             mel = mel.repeat(1, 1, repeats)
             mel = mel[:, :, :self.target_length]
+            
+        #print(f"7. After length adjustment - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
         
         # Format for AST: (time, n_mels)
         mel = mel.squeeze(0).t()
+        #print(f"8. Final output - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
+        #print("============================\n")
         
         return mel
 
@@ -121,7 +143,7 @@ class AudioVisualDataset(Dataset):
             container.streams.video[0].thread_type = "AUTO"
             
             # Get middle frame
-            target_frame = container.streams.video[0].frames // 2
+            target_frame = container.streams.video[0].frames // 2 
             
             for i, frame in enumerate(container.decode(video=0)):
                 if i == target_frame:
@@ -143,6 +165,7 @@ class AudioVisualDataset(Dataset):
             
     def _load_audio(self, video_path: str) -> torch.Tensor:
         try:
+            #print(f"\nLoading audio from {video_path}")
             container = av.open(video_path)
             audio = container.streams.audio[0]
             
@@ -151,8 +174,12 @@ class AudioVisualDataset(Dataset):
                 audio_frames.append(frame.to_ndarray())
             
             waveform = torch.from_numpy(np.concatenate(audio_frames))
-            mel_spec = self.audio_processor(waveform)
+            #print(f"Raw waveform - shape: {waveform.shape}, dtype: {waveform.dtype}")
+            #print(f"Waveform stats - min: {waveform.min():.3f}, max: {waveform.max():.3f}, mean: {waveform.mean():.3f}")
             
+            mel_spec = self.audio_processor(waveform)
+            if torch.isnan(mel_spec).any():
+                raise ValueError("NaN values found in mel_spec!")
             return mel_spec
             
         except Exception as e:
@@ -221,8 +248,15 @@ class ASTEmbedder(nn.Module):
             patch_embeddings: (batch_size, num_patches, embedding_dim)
         """
         # Add channel dim and transpose
+        # Print input stats
+        #print(f"AST input stats - min: {x.min():.3f}, max: {x.max():.3f}, mean: {x.mean():.3f}")
+        
+        # Add channel dim and transpose
         x = x.unsqueeze(1)  # (B, 1, T, F)
         x = x.transpose(2, 3)  # (B, 1, F, T)
+        
+        # Print before patch embedding
+        #print(f"Before patch embed - min: {x.min():.3f}, max: {x.max():.3f}, mean: {x.mean():.3f}")
         
         # Patch embedding
         x = self.patch_embed(x)  # (B, E, P1, P2)

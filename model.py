@@ -4,8 +4,12 @@ import torch.nn.functional as F
 from vit import ViTEmbedder
 from dataset import ASTEmbedder
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.1):
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -49,8 +53,11 @@ class AudioVisualModel(nn.Module):
         return clip_similarity
     
     def compute_all_similarities(self, audio_feats, visual_feats):
+        # Debug prints
+        #print(f"Audio feats stats - min: {audio_feats.min():.3f}, max: {audio_feats.max():.3f}, mean: {audio_feats.mean():.3f}")
+        #print(f"Visual feats stats - min: {visual_feats.min():.3f}, max: {visual_feats.max():.3f}, mean: {visual_feats.mean():.3f}")
         """
-        Compute similarities between all pairs of audio and visual features in the batch
+        Compute similarities between all pairs of audio and visual features in batch
         
         Args:
             audio_feats: (B, Na, D)
@@ -72,6 +79,10 @@ class AudioVisualModel(nn.Module):
         audio_feats = F.normalize(audio_feats, dim=-1)
         visual_feats = F.normalize(visual_feats, dim=-1)
         
+        # Debug prints after normalization
+        #print(f"Normalized audio feats stats - min: {audio_feats.min():.3f}, max: {audio_feats.max():.3f}")
+        #print(f"Normalized visual feats stats - min: {visual_feats.min():.3f}, max: {visual_feats.max():.3f}")
+        
         # Compute token-level similarities for all pairs
         # Result: (B, B, Na, Nv)
         token_sims = torch.matmul(
@@ -85,6 +96,10 @@ class AudioVisualModel(nn.Module):
         
         # Mean over audio dimension: (B, B)
         clip_sims = torch.mean(max_sims, dim=2)
+        #print(f"Similarity matrix stats - min: {clip_sims.min():.3f}, max: {clip_sims.max():.3f}, mean: {clip_sims.mean():.3f}")
+        
+        # Ensure clip_sims is properly shaped and finite
+        assert torch.isfinite(clip_sims).all(), "Non-finite values in similarities!"
         
         return clip_sims
         
@@ -96,19 +111,32 @@ class AudioVisualModel(nn.Module):
             clip_similarities: (B, B) matrix where:
                 - diagonal elements are positive pairs (same video)
                 - off-diagonal elements are negative pairs (different videos)
+            
+        Returns:
+            loss: scalar tensor
         """
         batch_size = clip_similarities.shape[0]
         labels = torch.arange(batch_size).to(clip_similarities.device)
         
         # Audio to Visual direction
         log_prob_a2v = F.log_softmax(clip_similarities, dim=1)
-        loss_a2v = -log_prob_a2v[torch.arange(batch_size), labels].mean()
+        # Get per-sample losses first
+        losses_a2v = -log_prob_a2v[torch.arange(batch_size), labels]  # (B,)
         
         # Visual to Audio direction
         log_prob_v2a = F.log_softmax(clip_similarities.t(), dim=1)
-        loss_v2a = -log_prob_v2a[torch.arange(batch_size), labels].mean()
+        losses_v2a = -log_prob_v2a[torch.arange(batch_size), labels]  # (B,)
         
-        return loss_a2v + loss_v2a
+        # Average both directions for each sample
+        per_sample_losses = (losses_a2v + losses_v2a) / 2  # (B,)
+        
+        # Final reduction to scalar
+        total_loss = per_sample_losses.mean()
+        
+        # Important: verify it's a scalar!
+        assert total_loss.dim() == 0, "Loss must be a scalar!"
+        
+        return total_loss
         
     def forward(self, frames, spectrograms):
         """
@@ -128,6 +156,11 @@ class AudioVisualModel(nn.Module):
         if self.training:
             # Compute all pairwise similarities in batch efficiently
             all_similarities = self.compute_all_similarities(audio_feats, visual_feats)
+            
+            # Verify shapes before loss
+            assert all_similarities.shape[0] == all_similarities.shape[1], \
+                f"Expected square similarity matrix, got shape {all_similarities.shape}"
+            
             return self.compute_contrastive_loss(all_similarities)
         else:
             # During inference, just compute similarities between corresponding pairs
