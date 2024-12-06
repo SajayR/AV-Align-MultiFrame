@@ -67,7 +67,10 @@ class AudioVisualizer:
             mode='bilinear',
             align_corners=False
         ).squeeze(1)
-        
+        #print("heatmaps.shape", heatmaps.shape)
+        #print("Is first equal to second?", (heatmaps[0] == heatmaps[1]).all())
+        #print("First heatmap:", heatmaps[0])
+        #print("Second heatmap:", heatmaps[1])
         return heatmaps
     
     def create_overlay_frame(self, frame: np.ndarray, heatmap: np.ndarray, alpha=0.6):
@@ -110,8 +113,17 @@ class AudioVisualizer:
         # Get attention maps
         attention_maps = self.get_attention_maps(model, frame, audio)
         
+        # Debug: Print attention map statistics
+        #print("Attention maps shape:", attention_maps.shape)
+        #print("Attention maps min:", attention_maps.min().item())
+        #print("Attention maps max:", attention_maps.max().item())
+        
         # Convert frame to numpy
         frame_np = (frame.squeeze(0).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+        print("frame_np.shape", frame_np.shape)
+        print("frame_np.dtype", frame_np.dtype)
+        print("frame_np.max()", frame_np.max())
+        print("frame_np.min()", frame_np.min())
         
         # Setup video writer
         output_path = Path(output_path)
@@ -124,12 +136,16 @@ class AudioVisualizer:
             fps,
             (self.image_size, self.image_size)
         )
-        
+        frame_count = 0
         # Create each frame
-        for heatmap in attention_maps.cpu().numpy():
+        for i, heatmap in enumerate(attention_maps.cpu().numpy()):
+            # Debug: Print each heatmap's min and max
+            #print(f"Heatmap {i} min:", heatmap.min(), "max:", heatmap.max())
+            
             overlay = self.create_overlay_frame(frame_np, heatmap)
             writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-        
+            frame_count += 1
+        print("Frame count:", frame_count)    
         writer.release()
         
     def plot_attention_snapshot(self, model, frame, audio, num_timesteps=5):
