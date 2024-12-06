@@ -9,6 +9,59 @@ import random
 import av
 import matplotlib.pyplot as plt
 from typing import Dict, List
+import torch.nn as nn
+import torchaudio.transforms as T
+from torch.cuda.amp import autocast
+import warnings
+warnings.filterwarnings("ignore")
+
+class AudioProcessor:
+    def __init__(self, sample_rate=16000, n_mels=128, target_length=300):
+        self.sample_rate = sample_rate
+        self.n_mels = n_mels
+        self.target_length = target_length
+        
+        self.mel_spec = T.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=int(0.025 * sample_rate),    # 25ms window
+            hop_length=int(0.010 * sample_rate),# 10ms hop
+            n_mels=n_mels,
+            power=2.0,
+            normalized=True
+        )
+    
+    def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Process audio waveform to mel spectrogram"""
+        # Handle mono audio without channel dim
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+        # Get mel spectrogram
+        mel = self.mel_spec(waveform)  # (1, n_mels, time)
+        
+        # Convert to db units and normalize
+        mel = torch.log(mel + 1e-10)
+        mel = (mel - mel.mean()) / (mel.std() * 2)
+        
+        # Handle length
+        current_length = mel.shape[2]
+        if current_length > self.target_length:
+            start = (current_length - self.target_length) // 2
+            mel = mel[:, :, start:start + self.target_length]
+        else:
+            # For shorter segments, we repeat the audio
+            repeats = (self.target_length + current_length - 1) // current_length
+            mel = mel.repeat(1, 1, repeats)
+            mel = mel[:, :, :self.target_length]
+        
+        # Format for AST: (time, n_mels)
+        mel = mel.squeeze(0).t()
+        
+        return mel
 
 class VideoBatchSampler(Sampler):
     def __init__(self, vid_nums: List[int], batch_size: int):
@@ -46,15 +99,17 @@ class AudioVisualDataset(Dataset):
     def __init__(self, 
                  video_dir: str,
                  frame_transform=None,
-                 audio_transform=None,
                  sample_rate: int = 16000,
-                 num_frames: int = 1):
+                 n_mels: int = 128,
+                 target_length: int = 300):
         
         self.video_paths = sorted([str(p) for p in Path(video_dir).glob("*.mp4")])
         self.frame_transform = frame_transform
-        self.audio_transform = audio_transform
-        self.sample_rate = sample_rate
-        self.num_frames = num_frames
+        self.audio_processor = AudioProcessor(
+            sample_rate=sample_rate,
+            n_mels=n_mels,
+            target_length=target_length
+        )
         
         # Parse video numbers for creating negative pairs
         self.vid_nums = [int(os.path.basename(p).split('_')[0]) 
@@ -96,11 +151,10 @@ class AudioVisualDataset(Dataset):
                 audio_frames.append(frame.to_ndarray())
             
             waveform = torch.from_numpy(np.concatenate(audio_frames))
+            mel_spec = self.audio_processor(waveform)
             
-            if self.audio_transform:
-                waveform = self.audio_transform(waveform)
+            return mel_spec
             
-            return waveform
         except Exception as e:
             print(f"Error loading audio from {video_path}: {str(e)}")
             raise
@@ -112,21 +166,81 @@ class AudioVisualDataset(Dataset):
         video_path = self.video_paths[idx]
         
         frame = self._load_video_frame(video_path)
-        audio = self._load_audio(video_path)
+        mel_spec = self._load_audio(video_path)
         
         return {
             'frame': frame,
-            'audio': audio,
+            'mel_spec': mel_spec,
             'vid_num': self.vid_nums[idx]
         }
+
+class ASTEmbedder(nn.Module):
+    def __init__(self, 
+                 fstride=128, 
+                 tstride=2, 
+                 input_fdim=128, 
+                 input_tdim=300,
+                 embed_dim=768):
+        super().__init__()
+        
+        # Patch embedding layer
+        self.patch_embed = nn.Conv2d(1, embed_dim, 
+                                   kernel_size=(input_fdim, tstride),
+                                   stride=(fstride, tstride))
+        
+        # Calculate number of patches
+        test_input = torch.randn(1, 1, input_fdim, input_tdim)
+        test_out = self.patch_embed(test_input)
+        num_patches = test_out.shape[2] * test_out.shape[3]
+        
+        # Positional embedding
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+        self.pos_drop = nn.Dropout(p=0.1)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+        torch.nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Conv2d):
+            w = m.weight.data
+            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, time_frame_num, frequency_bins)
+        Returns:
+            patch_embeddings: (batch_size, num_patches, embedding_dim)
+        """
+        # Add channel dim and transpose
+        x = x.unsqueeze(1)  # (B, 1, T, F)
+        x = x.transpose(2, 3)  # (B, 1, F, T)
+        
+        # Patch embedding
+        x = self.patch_embed(x)  # (B, E, P1, P2)
+        x = x.flatten(2)  # (B, E, P)
+        x = x.transpose(1, 2)  # (B, P, E)
+        
+        # Add positional embeddings
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+        
+        return x
 
 if __name__ == "__main__":
     # Define transforms
     frame_transform = torchvision.transforms.Compose([
         torchvision.transforms.Resize((224, 224)),
-        # We don't need ToPILImage() anymore since we're already handling the format conversion
         torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                    std=[0.229, 0.224, 0.225])
+                                      std=[0.229, 0.224, 0.225])
     ])
     
     # Test the dataset
@@ -136,24 +250,35 @@ if __name__ == "__main__":
     )
     
     # Test 1: Basic sample loading
-    print("=== Test 1: Basic Sample Loading ===")
+    print("\n=== Test 1: Basic Sample Loading ===")
     sample = dataset[0]
     print(f"Sample keys: {sample.keys()}")
     print(f"Frame shape: {sample['frame'].shape}")
-    print(f"Audio shape: {sample['audio'].shape}")
+    print(f"Mel spectrogram shape: {sample['mel_spec'].shape}")
+    print(f"Video number: {sample['vid_num']}")
     
-    # Test 2: Visualize frame
-    print("\n=== Test 2: Frame Visualization ===")
-    plt.figure(figsize=(10, 10))
+    # Test 2: Visualizations
+    print("\n=== Test 2: Visualizations ===")
+    plt.figure(figsize=(15, 5))
+    
+    # Show frame
+    plt.subplot(1, 2, 1)
     frame = sample['frame'].permute(1, 2, 0).numpy()
     frame = (frame - frame.min()) / (frame.max() - frame.min())
     plt.imshow(frame)
     plt.title(f"Frame from video {sample['vid_num']}")
+    
+    # Show mel spectrogram
+    plt.subplot(1, 2, 2)
+    plt.imshow(sample['mel_spec'].numpy(), aspect='auto', origin='lower')
+    plt.colorbar()
+    plt.title("Mel Spectrogram")
+    plt.tight_layout()
     plt.show()
     
     # Test 3: Batch sampling
     print("\n=== Test 3: Batch Sampling ===")
-    batch_size = 1024
+    batch_size = 4  # Smaller batch size for testing
     batch_sampler = VideoBatchSampler(dataset.vid_nums, batch_size=batch_size)
     dataloader = DataLoader(
         dataset,
@@ -168,8 +293,22 @@ if __name__ == "__main__":
     print(f"Unique vid_nums in batch: {len(set(vid_nums))}")
     assert len(set(vid_nums)) == batch_size, "Batch contains duplicate vid_nums!"
     
-    # Test 4: Dataloader speed
-    print("\n=== Test 4: Dataloader Speed ===")
+    # Test 4: Test AST Embedder
+    print("\n=== Test 4: AST Embedder ===")
+    ast_embedder = ASTEmbedder(
+        input_fdim=128,  # Should match n_mels
+        input_tdim=300,  # Should match target_length
+        embed_dim=768
+    )
+    
+    # Test with a batch from dataloader
+    mel_specs = batch['mel_spec']  # (B, T, F)
+    audio_embeddings = ast_embedder(mel_specs)
+    print(f"Input mel_spec shape: {mel_specs.shape}")
+    print(f"Output audio embeddings shape: {audio_embeddings.shape}")
+    
+    # Test 5: Dataloader speed
+    print("\n=== Test 5: Dataloader Speed ===")
     import time
     start = time.time()
     for i, batch in enumerate(dataloader):
