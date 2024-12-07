@@ -32,39 +32,24 @@ class AudioProcessor:
     
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
         """Process audio waveform to mel spectrogram"""
-        #print("\n=== Audio Processing Debug ===")
-        #print(f"1. Initial waveform - shape: {waveform.shape}, min: {waveform.min():.3f}, max: {waveform.max():.3f}")
-        #print(f"   dtype: {waveform.dtype}, device: {waveform.device}")
-        
         # Handle mono audio without channel dim
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
-        
         # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
-        
-        #print(f"2. After mono conversion - shape: {waveform.shape}, min: {waveform.min():.3f}, max: {waveform.max():.3f}")
-            
+
         # Get mel spectrogram
         mel = self.mel_spec(waveform)  # (1, n_mels, time)
-        #print(f"3. After mel spec - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
-        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
         
         # Convert to db units and normalize
         mel = torch.log(mel + 1e-10)
-        #print(f"4. After log - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
-        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
-        
         # Check mean and std before normalization
         mel_mean = mel.mean()
         mel_std = mel.std()
-        #print(f"5. Before norm - mean: {mel_mean:.3f}, std: {mel_std:.3f}")
+
         
         mel = (mel - mel_mean) / (mel_std * 2)
-        #print(f"6. After normalization - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
-        #print(f"   Any NaNs?: {torch.isnan(mel).any()}")
-        
         # Handle length
         current_length = mel.shape[2]
         if current_length > self.target_length:
@@ -75,14 +60,9 @@ class AudioProcessor:
             repeats = (self.target_length + current_length - 1) // current_length
             mel = mel.repeat(1, 1, repeats)
             mel = mel[:, :, :self.target_length]
-            
-        #print(f"7. After length adjustment - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
-        
+ 
         # Format for AST: (time, n_mels)
         mel = mel.squeeze(0).t()
-        #print(f"8. Final output - shape: {mel.shape}, min: {mel.min():.3f}, max: {mel.max():.3f}")
-        #print("============================\n")
-        
         return mel
 
 class VideoBatchSampler(Sampler):
@@ -173,10 +153,7 @@ class AudioVisualDataset(Dataset):
             for frame in container.decode(audio=0):
                 audio_frames.append(frame.to_ndarray())
             
-            waveform = torch.from_numpy(np.concatenate(audio_frames))
-            #print(f"Raw waveform - shape: {waveform.shape}, dtype: {waveform.dtype}")
-            #print(f"Waveform stats - min: {waveform.min():.3f}, max: {waveform.max():.3f}, mean: {waveform.mean():.3f}")
-            
+            waveform = torch.from_numpy(np.concatenate(audio_frames))     
             mel_spec = self.audio_processor(waveform)
             if torch.isnan(mel_spec).any():
                 raise ValueError("NaN values found in mel_spec!")
@@ -246,18 +223,10 @@ class ASTEmbedder(nn.Module):
             x: (batch_size, time_frame_num, frequency_bins)
         Returns:
             patch_embeddings: (batch_size, num_patches, embedding_dim)
-        """
-        # Add channel dim and transpose
-        # Print input stats
-        #print(f"AST input stats - min: {x.min():.3f}, max: {x.max():.3f}, mean: {x.mean():.3f}")
-        
+        """     
         # Add channel dim and transpose
         x = x.unsqueeze(1)  # (B, 1, T, F)
-        x = x.transpose(2, 3)  # (B, 1, F, T)
-        
-        # Print before patch embedding
-        #print(f"Before patch embed - min: {x.min():.3f}, max: {x.max():.3f}, mean: {x.mean():.3f}")
-        
+        x = x.transpose(2, 3)  # (B, 1, F, T)       
         # Patch embedding
         x = self.patch_embed(x)  # (B, E, P1, P2)
         x = x.flatten(2)  # (B, E, P)

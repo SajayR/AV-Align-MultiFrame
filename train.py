@@ -20,8 +20,8 @@ class AudioVisualTrainer:
         batch_size: int = 32,
         num_epochs: int = 100,
         learning_rate: float = 1e-4,
-        num_workers: int = 4,
-        vis_every: int = 100,  # Visualize every N steps
+        num_workers: int = 12,
+        vis_every: int = 64,  # Visualize every N steps
         device: str = 'cuda',
         use_wandb: bool = True
     ):
@@ -126,7 +126,7 @@ class AudioVisualTrainer:
         plt.close()
         
         # Save video every 10 epochs
-        if epoch % 10 == 0:
+        if epoch % 1 == 0:
             video_path = self.output_dir / f'attention_epoch_{epoch}.mp4'
             self.visualizer.make_attention_video(
                 self.model, self.vis_frame, self.vis_audio,
@@ -143,11 +143,12 @@ class AudioVisualTrainer:
     def train(self, num_epochs: int):
         step = 0
         best_loss = float('inf')
+        # Load weights if a checkpoint is provided
         
         for epoch in range(num_epochs):
             self.model.train()
-            for name, param in self.model.named_parameters():
-                print(f"Parameter: {name}, requires_grad: {param.requires_grad}, shape: {param.shape}")
+            #for name, param in self.model.named_parameters():
+                #print(f"Parameter: {name}, requires_grad: {param.requires_grad}, shape: {param.shape}")
             epoch_losses = []
             
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
@@ -173,6 +174,8 @@ class AudioVisualTrainer:
                 
                 # Log loss
                 loss_value = loss.item()
+                if torch.isnan(loss):
+                    raise ValueError("NaN values found in loss!")
                 epoch_losses.append(loss_value)
                 pbar.set_postfix({'loss': f'{loss_value:.4f}'})
                 
@@ -201,9 +204,9 @@ class AudioVisualTrainer:
                 })
             
             # Save checkpoint if best loss
-            if epoch_loss < best_loss:
-                best_loss = epoch_loss
-                self.save_checkpoint(epoch, step)
+            #if epoch_loss < best_loss:
+                #best_loss = epoch_loss
+                #self.save_checkpoint(epoch, step)
             
             # LR scheduler step
             self.scheduler.step()
@@ -217,9 +220,9 @@ if __name__ == "__main__":
         video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/dataset/solo_split_videos',
         output_dir='./outputs',
         batch_size=32,
-        num_epochs=300,
-        learning_rate=3e-5,
-        use_wandb=True  # Set to False if you don't want to use wandb
+        num_epochs=500,
+        learning_rate=1e-4,
+        use_wandb=False  # Set to False if you don't want to use wandb
     )
     
-    trainer.train(num_epochs=100)
+    trainer.train(num_epochs=500)

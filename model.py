@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=0.1):
+    def __init__(self, temperature=0.2):
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -28,11 +28,18 @@ class AudioVisualModel(nn.Module):
             similarity_matrix: (B, Na, Nv)
         """
         # Normalize embeddings
+        #print("Audio feats stats before norm - min:", audio_feats.min().item(), "max:", audio_feats.max().item())
+        #print("Visual feats stats before norm - min:", visual_feats.min().item(), "max:", visual_feats.max().item())
+        
+        # Normalize embeddings
         audio_feats = F.normalize(audio_feats, dim=-1)
         visual_feats = F.normalize(visual_feats, dim=-1)
         
-        # Compute similarities
+        # Compute similarities and check values
         similarity = torch.bmm(audio_feats, visual_feats.transpose(1, 2))
+        #print("Raw similarity stats - min:", similarity.min().item(),
+          #  "max:", similarity.max().item())
+        
         return similarity / self.temperature
     
     def aggregate_token_similarities(self, similarity_matrix):
@@ -53,9 +60,6 @@ class AudioVisualModel(nn.Module):
         return clip_similarity
     
     def compute_all_similarities(self, audio_feats, visual_feats):
-        # Debug prints
-        #print(f"Audio feats stats - min: {audio_feats.min():.3f}, max: {audio_feats.max():.3f}, mean: {audio_feats.mean():.3f}")
-        #print(f"Visual feats stats - min: {visual_feats.min():.3f}, max: {visual_feats.max():.3f}, mean: {visual_feats.mean():.3f}")
         """
         Compute similarities between all pairs of audio and visual features in batch
         
@@ -77,12 +81,7 @@ class AudioVisualModel(nn.Module):
         
         # Normalize
         audio_feats = F.normalize(audio_feats, dim=-1)
-        visual_feats = F.normalize(visual_feats, dim=-1)
-        
-        # Debug prints after normalization
-        #print(f"Normalized audio feats stats - min: {audio_feats.min():.3f}, max: {audio_feats.max():.3f}")
-        #print(f"Normalized visual feats stats - min: {visual_feats.min():.3f}, max: {visual_feats.max():.3f}")
-        
+        visual_feats = F.normalize(visual_feats, dim=-1)      
         # Compute token-level similarities for all pairs
         # Result: (B, B, Na, Nv)
         token_sims = torch.matmul(
@@ -95,9 +94,7 @@ class AudioVisualModel(nn.Module):
         max_sims = torch.max(token_sims, dim=3)[0]
         
         # Mean over audio dimension: (B, B)
-        clip_sims = torch.mean(max_sims, dim=2)
-        #print(f"Similarity matrix stats - min: {clip_sims.min():.3f}, max: {clip_sims.max():.3f}, mean: {clip_sims.mean():.3f}")
-        
+        clip_sims = torch.mean(max_sims, dim=2)      
         # Ensure clip_sims is properly shaped and finite
         assert torch.isfinite(clip_sims).all(), "Non-finite values in similarities!"
         

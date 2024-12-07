@@ -13,7 +13,13 @@ class AudioVisualizer:
         self.num_patches = image_size // patch_size
         
         # Create a custom colormap (transparent -> red)
-        colors = [(1,0,0,0), (1,0,0,1)]  # R,G,B,A
+        #colors = [(1,0,0,0), (1,0,0,1)]  # R,G,B,A
+        colors = [
+            (0,0,0,0),     # Transparent for low attention
+            (0,0,1,0.5),   # Blue for medium-low
+            (1,0,0,0.7),   # Red for medium-high  
+            (1,1,0,1)      # Yellow for high attention
+        ]
         self.cmap = LinearSegmentedColormap.from_list('custom', colors)
         
     def get_attention_maps(self, model, frame, audio):
@@ -33,15 +39,19 @@ class AudioVisualizer:
             # Get embeddings
             visual_feats = model.visual_embedder(frame)     # (1, Nv, D)
             audio_feats = model.audio_embedder(audio)       # (1, Na, D)
-            
+            #print("audio_feats.shape", audio_feats.shape)
+            #print("visual_feats.shape", visual_feats.shape)
             # Compute token-level similarities
             similarity = model.compute_similarity_matrix(
                 audio_feats, 
                 visual_feats
             ).squeeze(0)  # (Na, Nv)
-            
+            #print("Similarity matrix: ", similarity.shape)
+            #print("Is first equal to second in similarity matrix?", (similarity[0] == similarity[1]).all())
             # Convert patch attention to pixel attention
             attention_maps = self.patches_to_heatmaps(similarity)
+            #print("attention_maps.shape", attention_maps.shape)
+            #print("Is first extremely close to second in attention maps?", torch.allclose(attention_maps[0], attention_maps[1], atol=1e-6))
             
         return attention_maps
     
@@ -57,23 +67,25 @@ class AudioVisualizer:
         """
         Na, Nv = patch_attention.shape
         
-        # Reshape to square grid
+        # Add some debug prints
+        #print("Unique attention values per token:", 
+         #   [len(torch.unique(patch_attention[i])) for i in range(Na)])
+        
         patches = patch_attention.reshape(Na, self.num_patches, self.num_patches)
         
-        # Upsample to image size
+        # Maybe add some contrast enhancement?
+        patches = patches ** 2  # Square to enhance differences
+        
         heatmaps = F.interpolate(
             patches.unsqueeze(1),
             size=(self.image_size, self.image_size),
             mode='bilinear',
             align_corners=False
         ).squeeze(1)
-        #print("heatmaps.shape", heatmaps.shape)
-        #print("Is first equal to second?", (heatmaps[0] == heatmaps[1]).all())
-        #print("First heatmap:", heatmaps[0])
-        #print("Second heatmap:", heatmaps[1])
+        
         return heatmaps
     
-    def create_overlay_frame(self, frame: np.ndarray, heatmap: np.ndarray, alpha=0.6):
+    def create_overlay_frame(self, frame: np.ndarray, heatmap: np.ndarray, alpha=0.5):
         """
         Create a single frame with heatmap overlay
         
@@ -85,18 +97,21 @@ class AudioVisualizer:
         Returns:
             overlay: (H, W, C) frame with heatmap overlay
         """
-        # Normalize heatmap
+        
+        # Normalize heatmap to [0,1] range regardless of input range
+        # More aggressive normalization
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
         
-        # Create RGBA heatmap
+        # Add some contrast enhancement
+        heatmap = np.power(heatmap, 0.5)  # This will make the differences more visible
+        
+        # Create RGBA heatmap with our new colormap
         heatmap_colored = self.cmap(heatmap)
         
         # Convert to BGR for cv2
         heatmap_bgr = (heatmap_colored[...,:3] * 255).astype(np.uint8)
-        
         # Blend
-        overlay = cv2.addWeighted(frame, 1.0, heatmap_bgr, alpha, 0)
-        
+        overlay = ((1-alpha) * frame + alpha * heatmap_bgr).astype(np.uint8)
         return overlay
     
     def make_attention_video(self, model, frame, audio, output_path, fps=30):
@@ -113,17 +128,12 @@ class AudioVisualizer:
         # Get attention maps
         attention_maps = self.get_attention_maps(model, frame, audio)
         
-        # Debug: Print attention map statistics
-        #print("Attention maps shape:", attention_maps.shape)
-        #print("Attention maps min:", attention_maps.min().item())
-        #print("Attention maps max:", attention_maps.max().item())
-        
-        # Convert frame to numpy
-        frame_np = (frame.squeeze(0).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
-        print("frame_np.shape", frame_np.shape)
-        print("frame_np.dtype", frame_np.dtype)
-        print("frame_np.max()", frame_np.max())
-        print("frame_np.min()", frame_np.min())
+        # Convert frame to numpy, but preserve more dynamic range before uint8 conversion
+        frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
+        # Normalize frame to [0, 1] range first
+        frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
+        # Then scale to [0, 255] and convert to uint8
+        frame_np = (frame_np * 255).astype(np.uint8)
         
         # Setup video writer
         output_path = Path(output_path)
@@ -136,16 +146,25 @@ class AudioVisualizer:
             fps,
             (self.image_size, self.image_size)
         )
+        
         frame_count = 0
         # Create each frame
+        first_overlay = None
+        second_overlay = None
+        #checking if first and second heatmaps are different
+        #print("Is first heatmap different from second heatmap?", (attention_maps[0] != attention_maps[1]).any())
         for i, heatmap in enumerate(attention_maps.cpu().numpy()):
-            # Debug: Print each heatmap's min and max
-            #print(f"Heatmap {i} min:", heatmap.min(), "max:", heatmap.max())
-            
             overlay = self.create_overlay_frame(frame_np, heatmap)
+            if i == 0:
+                first_overlay = overlay
+            elif i == 1:
+                second_overlay = overlay
+                #print("Is first overlay different from second overlay?", (first_overlay != second_overlay).any())
             writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
             frame_count += 1
-        print("Frame count:", frame_count)    
+        
+        #print(f"Frame count: {frame_count}")    
+        print("Video updated")
         writer.release()
         
     def plot_attention_snapshot(self, model, frame, audio, num_timesteps=5):
@@ -176,8 +195,10 @@ class AudioVisualizer:
             ax.set_title(f'Time: {t/50:.2f}s')  # Assuming 50 tokens per second
             ax.axis('off')
             
+        output_path = 'outputs/attention_snapshot.png'
         plt.tight_layout()
-        plt.show()
+        plt.savefig(output_path)
+        
 
 if __name__ == "__main__":
     # Test visualization
