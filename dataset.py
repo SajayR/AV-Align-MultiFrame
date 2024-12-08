@@ -175,7 +175,8 @@ class AudioVisualDataset(Dataset):
         return {
             'frame': frame,
             'mel_spec': mel_spec,
-            'vid_num': self.vid_nums[idx]
+            'vid_num': self.vid_nums[idx],
+            'video_path': video_path #added
         }
 
 class ASTEmbedder(nn.Module):

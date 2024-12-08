@@ -84,6 +84,7 @@ class AudioVisualTrainer:
         sample = next(iter(self.dataloader))
         self.vis_frame = sample['frame'][0:1].to(device)
         self.vis_audio = sample['mel_spec'][0:1].to(device)
+        self.original_video_path = sample['video_path'][0]
         
         if use_wandb:
             wandb.init(
@@ -125,12 +126,16 @@ class AudioVisualTrainer:
         
         plt.close()
         
-        # Save video every 10 epochs
+        # Save video every epoch
         if epoch % 1 == 0:
             video_path = self.output_dir / f'attention_epoch_{epoch}.mp4'
+            
             self.visualizer.make_attention_video(
-                self.model, self.vis_frame, self.vis_audio,
-                video_path
+                self.model, 
+                self.vis_frame, 
+                self.vis_audio,
+                video_path,
+                video_path=self.original_video_path
             )
             
             if self.use_wandb:

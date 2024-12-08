@@ -114,58 +114,77 @@ class AudioVisualizer:
         overlay = ((1-alpha) * frame + alpha * heatmap_bgr).astype(np.uint8)
         return overlay
     
-    def make_attention_video(self, model, frame, audio, output_path, fps=30):
+    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=30):
         """
-        Create a video showing attention overlay for each audio token
+        Create a video showing attention overlay with original audio
         
         Args:
             model: AudioVisualModel instance
             frame: (1, C, H, W) single frame tensor
             audio: (1, T, F) audio spectrogram tensor
             output_path: path to save the video
+            video_path: path to original video file for audio
             fps: frames per second for the output video
         """
         # Get attention maps
         attention_maps = self.get_attention_maps(model, frame, audio)
         
-        # Convert frame to numpy, but preserve more dynamic range before uint8 conversion
+        # Convert frame to numpy
         frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
-        # Normalize frame to [0, 1] range first
         frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
-        # Then scale to [0, 255] and convert to uint8
         frame_np = (frame_np * 255).astype(np.uint8)
         
-        # Setup video writer
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Create temporary video without audio
+        temp_video_path = str(Path(output_path).with_suffix('.temp.mp4'))
         
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(
-            str(output_path),
+            temp_video_path,
             fourcc,
             fps,
             (self.image_size, self.image_size)
         )
         
-        frame_count = 0
-        # Create each frame
-        first_overlay = None
-        second_overlay = None
-        #checking if first and second heatmaps are different
-        #print("Is first heatmap different from second heatmap?", (attention_maps[0] != attention_maps[1]).any())
-        for i, heatmap in enumerate(attention_maps.cpu().numpy()):
+        # Write frames
+        for heatmap in attention_maps.cpu().numpy():
             overlay = self.create_overlay_frame(frame_np, heatmap)
-            if i == 0:
-                first_overlay = overlay
-            elif i == 1:
-                second_overlay = overlay
-                #print("Is first overlay different from second overlay?", (first_overlay != second_overlay).any())
             writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-            frame_count += 1
         
-        #print(f"Frame count: {frame_count}")    
-        print("Video updated")
         writer.release()
+        
+        # If original video path is provided, add audio
+        if video_path is not None:
+            import ffmpeg
+            
+            # Get audio from original video
+            audio_input = ffmpeg.input(video_path).audio
+            
+            # Get video from our temp file
+            video_input = ffmpeg.input(temp_video_path).video
+            
+            # Combine video and audio
+            stream = ffmpeg.output(
+                video_input, 
+                audio_input, 
+                str(output_path),
+                vcodec='copy',  # Copy video stream to avoid re-encoding
+                acodec='aac'    # Re-encode audio to ensure compatibility
+            ).overwrite_output()
+            
+            try:
+                stream.run(capture_stdout=True, capture_stderr=True)
+            except ffmpeg.Error as e:
+                print('stdout:', e.stdout.decode('utf8'))
+                print('stderr:', e.stderr.decode('utf8'))
+                raise e
+            
+            # Clean up temp file
+            Path(temp_video_path).unlink()
+        else:
+            # If no audio provided, just rename temp file
+            Path(temp_video_path).rename(output_path)
+        
+        print("Video updated")
         
     def plot_attention_snapshot(self, model, frame, audio, num_timesteps=5):
         """
