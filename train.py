@@ -51,9 +51,9 @@ class AudioVisualTrainer:
             frame_transform=frame_transform
         )
         
-        # Initialize dataloader
+        # Initialize dataloader with simplified sampler
         self.batch_sampler = VideoBatchSampler(
-            self.dataset.vid_nums, 
+            num_videos=len(self.dataset),
             batch_size=batch_size
         )
         
@@ -148,53 +148,30 @@ class AudioVisualTrainer:
     def train(self, num_epochs: int):
         step = 0
         best_loss = float('inf')
-        # Load weights if a checkpoint is provided
         
         for epoch in range(num_epochs):
             self.model.train()
-            #for name, param in self.model.named_parameters():
-                #print(f"Parameter: {name}, requires_grad: {param.requires_grad}, shape: {param.shape}")
             epoch_losses = []
             
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for batch in pbar:
-                self.model.train()
                 # Move batch to device
+                self.model.train()
                 frames = batch['frame'].to(self.device)
                 audio = batch['mel_spec'].to(self.device)
                 
                 # Forward pass
-                # Check for NaNs in frames and audio
-                if torch.isnan(frames).any():
-                    raise ValueError("NaN values found in frames!")
-                if torch.isnan(audio).any():
-                    raise ValueError("NaN values found in audio!")
                 loss = self.model(frames, audio)
-                #print(f"Loss training: {loss}")
+                
                 # Backward pass
                 self.optimizer.zero_grad()
-                
-                # Check weights before backward pass on first iteration
-                if epoch == 0 and step == 0:
-                    weights_before = {name: param.clone().detach() for name, param in self.model.named_parameters()}
-                
                 loss.backward()
                 
-                # Check if weights were updated on first iteration
-                if epoch == 0 and step == 0:
-                    weights_after = {name: param.clone().detach() for name, param in self.model.named_parameters()}
-                    for name in weights_before:
-                        if not torch.equal(weights_before[name], weights_after[name]):
-                            print(f"Weights updated for {name}")
-                        else:
-                            print(f"Warning: Weights not updated for {name}")
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
                 
                 # Log loss
                 loss_value = loss.item()
-                if torch.isnan(loss):
-                    raise ValueError("NaN values found in loss!")
                 epoch_losses.append(loss_value)
                 pbar.set_postfix({'loss': f'{loss_value:.4f}'})
                 
@@ -223,9 +200,9 @@ class AudioVisualTrainer:
                 })
             
             # Save checkpoint if best loss
-            #if epoch_loss < best_loss:
-                #best_loss = epoch_loss
-                #self.save_checkpoint(epoch, step)
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                self.save_checkpoint(epoch, step)
             
             # LR scheduler step
             self.scheduler.step()
@@ -236,9 +213,9 @@ class AudioVisualTrainer:
 
 if __name__ == "__main__":
     trainer = AudioVisualTrainer(
-        video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/dataset/solo_split_videos',
+        video_dir='/home/cisco/heyo/densefuck/VGGSound/vggsound_download/downloads',
         output_dir='./outputs',
-        batch_size=32,
+        batch_size=2,
         num_epochs=500,
         learning_rate=1e-4,
         use_wandb=False  # Set to False if you don't want to use wandb

@@ -65,37 +65,105 @@ class AudioProcessor:
         mel = mel.squeeze(0).t()
         return mel
 
+class AudioProcessor:
+    def __init__(self, 
+                 sample_rate=16000,
+                 n_mels=128,
+                 target_length=998,  # Calculated for 10s clips
+                 ):
+        self.sample_rate = sample_rate
+        self.n_mels = n_mels
+        self.target_length = target_length
+        
+        # Window and hop length for 25ms windows with 10ms hop
+        self.n_fft = int(0.025 * sample_rate)
+        self.hop_length = int(0.010 * sample_rate)
+        
+        self.mel_spec = T.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            n_mels=n_mels,
+            power=2.0,
+            normalized=True,
+            center=True,
+            pad_mode='reflect',
+            norm='slaney',  # Using slaney norm as it's standard for audio processing
+            mel_scale='htk'  # HTK scale is standard for audio classification
+        )
+        
+            
+    def load_audio(self, audio_path: str, start_time: float = 0.0) -> torch.Tensor:
+        """Load audio file and extract 10s segment"""
+        waveform, sr = torchaudio.load(audio_path, normalize=True)
+        if sr != self.sample_rate:
+            resampler = T.Resample(sr, self.sample_rate)
+            waveform = resampler(waveform)
+            
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+        # Extract 10s segment
+        start_sample = int(start_time * self.sample_rate)
+        segment_samples = 10 * self.sample_rate
+        
+        if waveform.shape[1] < segment_samples:
+            # Pad if audio is too short
+            pad_length = segment_samples - waveform.shape[1]
+            waveform = torch.nn.functional.pad(waveform, (0, pad_length))
+        else:
+            waveform = waveform[:, start_sample:start_sample + segment_samples]
+            
+        return waveform
+            
+    def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Process audio waveform to mel spectrogram"""
+        # Ensure correct shape
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+        # Get mel spectrogram
+        mel = self.mel_spec(waveform)  # (1, n_mels, time)
+        
+        # Convert to db units and normalize
+        mel = torch.log(mel + 1e-10)
+        mel = (mel - mel.mean()) / (mel.std() + 1e-10)
+        
+        # Handle length
+        current_length = mel.shape[2]
+        if current_length > self.target_length:
+            start = (current_length - self.target_length) // 2
+            mel = mel[:, :, start:start + self.target_length]
+        else:
+            # For shorter segments, we pad with repetition
+            repeats = (self.target_length + current_length - 1) // current_length
+            mel = mel.repeat(1, 1, repeats)
+            mel = mel[:, :, :self.target_length]
+        
+        # Format for AST: (time, n_mels)
+        mel = mel.squeeze(0).t()
+        return mel
+
 class VideoBatchSampler(Sampler):
-    def __init__(self, vid_nums: List[int], batch_size: int):
-        self.vid_nums = np.array(vid_nums)
+    """Simple random batch sampler"""
+    def __init__(self, num_videos: int, batch_size: int):
+        self.num_videos = num_videos
         self.batch_size = batch_size
         
-        # Group indices by vid_num
-        self.vid_to_indices = {}
-        for i, vid in enumerate(vid_nums):
-            if vid not in self.vid_to_indices:
-                self.vid_to_indices[vid] = []
-            self.vid_to_indices[vid].append(i)
-            
     def __iter__(self):
-        # Get unique vid_nums
-        unique_vids = list(self.vid_to_indices.keys())
-        random.shuffle(unique_vids)  # Shuffle at epoch start
+        # Create list of indices and shuffle
+        indices = list(range(self.num_videos))
+        random.shuffle(indices)
         
-        while len(unique_vids) >= self.batch_size:
-            batch_vids = unique_vids[:self.batch_size]
-            
-            # For each selected video, randomly pick one of its segments
-            batch = []
-            for vid in batch_vids:
-                idx = random.choice(self.vid_to_indices[vid])
-                batch.append(idx)
-            
-            yield batch
-            unique_vids = unique_vids[self.batch_size:]
+        # Yield batches
+        for i in range(0, len(indices) - self.batch_size + 1, self.batch_size):
+            yield indices[i:i + self.batch_size]
     
     def __len__(self):
-        return len(set(self.vid_nums)) // self.batch_size
+        return self.num_videos // self.batch_size
 
 class AudioVisualDataset(Dataset):
     def __init__(self, 
@@ -103,21 +171,19 @@ class AudioVisualDataset(Dataset):
                  frame_transform=None,
                  sample_rate: int = 16000,
                  n_mels: int = 128,
-                 target_length: int = 300):
+                 target_length: int = 998):  # For 10s clips
         
         self.video_paths = sorted([str(p) for p in Path(video_dir).glob("*.mp4")])
         self.frame_transform = frame_transform
+        
         self.audio_processor = AudioProcessor(
             sample_rate=sample_rate,
             n_mels=n_mels,
             target_length=target_length
         )
-        
-        # Parse video numbers for creating negative pairs
-        self.vid_nums = [int(os.path.basename(p).split('_')[0]) 
-                        for p in self.video_paths]
     
     def _load_video_frame(self, video_path: str) -> torch.Tensor:
+        """Load middle frame from video"""
         try:
             container = av.open(video_path)
             container.streams.video[0].thread_type = "AUTO"
@@ -127,10 +193,7 @@ class AudioVisualDataset(Dataset):
             
             for i, frame in enumerate(container.decode(video=0)):
                 if i == target_frame:
-                    # Convert to numpy array (H, W, 3)
                     numpy_frame = frame.to_ndarray(format='rgb24')
-                    
-                    # Convert to tensor, permute to (C, H, W) and convert to float32
                     frame_tensor = torch.from_numpy(numpy_frame).permute(2, 0, 1).float() / 255.0
                     
                     if self.frame_transform:
@@ -144,8 +207,8 @@ class AudioVisualDataset(Dataset):
             raise
             
     def _load_audio(self, video_path: str) -> torch.Tensor:
+        """Load and process audio"""
         try:
-            #print(f"\nLoading audio from {video_path}")
             container = av.open(video_path)
             audio = container.streams.audio[0]
             
@@ -153,10 +216,12 @@ class AudioVisualDataset(Dataset):
             for frame in container.decode(audio=0):
                 audio_frames.append(frame.to_ndarray())
             
-            waveform = torch.from_numpy(np.concatenate(audio_frames))     
+            waveform = torch.from_numpy(np.concatenate(audio_frames))
             mel_spec = self.audio_processor(waveform)
+            
             if torch.isnan(mel_spec).any():
                 raise ValueError("NaN values found in mel_spec!")
+                
             return mel_spec
             
         except Exception as e:
@@ -173,42 +238,97 @@ class AudioVisualDataset(Dataset):
         mel_spec = self._load_audio(video_path)
         
         return {
-            'frame': frame,
-            'mel_spec': mel_spec,
-            'vid_num': self.vid_nums[idx],
-            'video_path': video_path #added
+            'frame': frame,         # (C, H, W)
+            'mel_spec': mel_spec,   # (T, F)
+            'video_path': video_path
         }
 
-class ASTEmbedder(nn.Module):
+class PatchEmbed(nn.Module):
+    """
+    2D patch embedding layer specifically designed for audio spectrograms
+    """
     def __init__(self, 
-                 fstride=128, 
-                 tstride=2, 
-                 input_fdim=128, 
-                 input_tdim=300,
-                 embed_dim=768):
+                 input_fdim=128,      # Frequency dimension (mel bins)
+                 input_tdim=998,      # Time dimension (for 10s audio)
+                 patch_size=(16, 16), # Patch size in (freq, time)
+                 embed_dim=768):      # Embedding dimension
+        super().__init__()
+        
+        self.input_fdim = input_fdim
+        self.input_tdim = input_tdim
+        self.patch_size = patch_size
+        
+        # Calculate number of patches
+        self.num_patches = (input_fdim // patch_size[0]) * (input_tdim // patch_size[1])
+        
+        # Convolutional layer for patch embedding
+        self.proj = nn.Conv2d(1,                      # Input channels (1 for mel spec)
+                             embed_dim,               # Output embedding dimension
+                             kernel_size=patch_size,  
+                             stride=patch_size)       # Non-overlapping patches
+    
+    def forward(self, x):
+        # x shape: (B, T, F) -> need (B, 1, F, T)
+        x = x.unsqueeze(1)
+        x = x.transpose(2, 3)
+        
+        # Project to embedding space
+        x = self.proj(x)  # (B, embed_dim, H, W)
+        
+        # Flatten patches and transpose
+        x = x.flatten(2)  # (B, embed_dim, num_patches)
+        x = x.transpose(1, 2)  # (B, num_patches, embed_dim)
+        
+        return x
+
+class ASTEmbedder(nn.Module):
+    def __init__(self,
+                 input_fdim=128,     # Number of mel bins
+                 input_tdim=998,     # Time frames for 10s
+                 patch_size=(16, 16),# Patch size
+                 embed_dim=768,      # Embedding dimension
+                 depth=12,           # Number of transformer layers
+                 num_heads=12,       # Number of attention heads
+                 mlp_ratio=4.,       # MLP hidden dim ratio
+                 drop_rate=0.1,      # Dropout rate
+                 attn_drop_rate=0.1):# Attention dropout rate
         super().__init__()
         
         # Patch embedding layer
-        self.patch_embed = nn.Conv2d(1, embed_dim, 
-                                   kernel_size=(input_fdim, tstride),
-                                   stride=(fstride, tstride))
+        self.patch_embed = PatchEmbed(
+            input_fdim=input_fdim,
+            input_tdim=input_tdim,
+            patch_size=patch_size,
+            embed_dim=embed_dim
+        )
+        num_patches = self.patch_embed.num_patches
         
-        # Calculate number of patches
-        test_input = torch.randn(1, 1, input_fdim, input_tdim)
-        test_out = self.patch_embed(test_input)
-        num_patches = test_out.shape[2] * test_out.shape[3]
-        
-        # Positional embedding
+        # Position embeddings
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
-        self.pos_drop = nn.Dropout(p=0.1)
+        self.pos_drop = nn.Dropout(p=drop_rate)
+        
+        # Transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=int(embed_dim * mlp_ratio),
+            dropout=drop_rate,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True  # Better training stability
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth,
+            norm=nn.LayerNorm(embed_dim)
+        )
         
         # Initialize weights
         self.apply(self._init_weights)
-        torch.nn.init.trunc_normal_(self.pos_embed, std=0.02)
-
+        
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            torch.nn.init.trunc_normal_(m.weight, std=.02)
+            nn.init.trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -216,26 +336,29 @@ class ASTEmbedder(nn.Module):
             nn.init.constant_(m.weight, 1.0)
         elif isinstance(m, nn.Conv2d):
             w = m.weight.data
-            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-
+            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            
+        # Initialize position embeddings
+        if isinstance(m, ASTEmbedder):
+            nn.init.trunc_normal_(m.pos_embed, std=0.02)
+            
     def forward(self, x):
         """
         Args:
-            x: (batch_size, time_frame_num, frequency_bins)
+            x: (batch_size, time_frames, frequency_bins)
+                For 10s audio: (B, 998, 128)
         Returns:
-            patch_embeddings: (batch_size, num_patches, embedding_dim)
-        """     
-        # Add channel dim and transpose
-        x = x.unsqueeze(1)  # (B, 1, T, F)
-        x = x.transpose(2, 3)  # (B, 1, F, T)       
+            encoded: (batch_size, num_patches, embed_dim)
+        """
         # Patch embedding
-        x = self.patch_embed(x)  # (B, E, P1, P2)
-        x = x.flatten(2)  # (B, E, P)
-        x = x.transpose(1, 2)  # (B, P, E)
+        x = self.patch_embed(x)
         
         # Add positional embeddings
         x = x + self.pos_embed
         x = self.pos_drop(x)
+        
+        # Transformer encoding
+        x = self.transformer(x)
         
         return x
 
@@ -250,14 +373,15 @@ if __name__ == "__main__":
     # Test the dataset
     dataset = AudioVisualDataset(
         video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/dataset/solo_split_videos',
-        frame_transform=frame_transform
+        frame_transform=frame_transform,
+        num_frames=1
     )
     
     # Test 1: Basic sample loading
     print("\n=== Test 1: Basic Sample Loading ===")
     sample = dataset[0]
     print(f"Sample keys: {sample.keys()}")
-    print(f"Frame shape: {sample['frame'].shape}")
+    print(f"Frame shape: {sample['frames'].shape}")
     print(f"Mel spectrogram shape: {sample['mel_spec'].shape}")
     print(f"Video number: {sample['vid_num']}")
     
@@ -267,7 +391,7 @@ if __name__ == "__main__":
     
     # Show frame
     plt.subplot(1, 2, 1)
-    frame = sample['frame'].permute(1, 2, 0).numpy()
+    frame = sample['frames'].permute(1, 2, 0).numpy()
     frame = (frame - frame.min()) / (frame.max() - frame.min())
     plt.imshow(frame)
     plt.title(f"Frame from video {sample['vid_num']}")
@@ -301,7 +425,7 @@ if __name__ == "__main__":
     print("\n=== Test 4: AST Embedder ===")
     ast_embedder = ASTEmbedder(
         input_fdim=128,  # Should match n_mels
-        input_tdim=300,  # Should match target_length
+        input_tdim=998,  # Should match target_length
         embed_dim=768
     )
     
@@ -320,3 +444,37 @@ if __name__ == "__main__":
     print(f"Time for 10 batches: {time.time() - start:.2f}s")
     
     print("\nAll tests passed! 🚀")
+    processor = AudioProcessor()
+    dummy_audio = torch.randn(1, 160000)  # 10s at 16kHz
+    
+    # Process audio
+    mel_spec = processor(dummy_audio)
+    print(f"Mel spectrogram shape: {mel_spec.shape}")  # Should be (998, 128)
+    
+    # Visualize
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(15, 5))
+    plt.imshow(mel_spec.numpy(), aspect='auto', origin='lower')
+    plt.colorbar()
+    plt.title("Mel Spectrogram")
+    plt.xlabel("Time")
+    plt.ylabel("Mel Frequency")
+    plt.tight_layout()
+    plt.show()
+
+    batch_size = 4
+    model = ASTEmbedder()
+    
+    # Print model info
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {num_params:,}")
+    
+    # Create dummy input
+    x = torch.randn(batch_size, 998, 128)
+    
+    # Forward pass
+    with torch.no_grad():
+        out = model(x)
+        
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {out.shape}")
