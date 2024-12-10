@@ -113,18 +113,33 @@ class AudioVisualModel(nn.Module):
         l_nonneg = torch.mean(neg_sims ** 2)
         
         # 2. Temperature/Calibration stability
-        l_cal = torch.clamp(torch.log(torch.tensor(1.0)) - torch.log(self.temperature), min=0) ** 2
+        l_cal = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
         
         # 3. Spatial smoothness on attention maps (simplified TV loss)
-        # Take differences between adjacent spatial locations
         spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
         l_spatial = torch.mean(spatial_diffs ** 2)
         
+        # 4. Sparsity loss - encourage focused attention
+        # Normalize attention scores to [0,1] range for each audio token
+        attn_norm = torch.sigmoid(token_sims)  # [B, B, Na, Nv]
+        
+        # Parameters for sparsity control
+        threshold = 0.5  # Attention threshold
+        alpha = 2.0      # Exponential penalty strength
+        
+        # Count patches above threshold with soft thresholding
+        above_threshold = F.relu(attn_norm - threshold)
+        # Sum across visual patches for each audio token
+        num_high_attn = torch.sum(above_threshold, dim=-1)  # [B, B, Na]
+        # Apply exponential penalty
+        l_sparsity = torch.mean(torch.exp(alpha * num_high_attn))
+        
         # Combine regularization terms
         reg_loss = (0.01 * l_nonneg + 
-                   0.1 * l_cal + 
-                   0.01 * l_spatial)
-                   
+                    0.1 * l_cal + 
+                    0.01 * l_spatial + 
+                    0.01 * l_sparsity)  # Can adjust this weight to control sparsity strength
+                    
         return reg_loss
         
     def forward(self, frames, spectrograms):

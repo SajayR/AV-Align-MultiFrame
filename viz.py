@@ -114,9 +114,10 @@ class AudioVisualizer:
         overlay = ((1-alpha) * frame + alpha * heatmap_bgr).astype(np.uint8)
         return overlay
     
-    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=30):
+    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=100):
         """
         Create a video showing attention overlay with original audio
+        Each audio token (1/100 sec) corresponds to one video frame
         
         Args:
             model: AudioVisualModel instance
@@ -124,18 +125,22 @@ class AudioVisualizer:
             audio: (1, T, F) audio spectrogram tensor
             output_path: path to save the video
             video_path: path to original video file for audio
-            fps: frames per second for the output video
+            fps: frames per second for the output video (100 fps matches our audio tokens)
         """
         # Get attention maps
         attention_maps = self.get_attention_maps(model, frame, audio)
         
-        # Convert frame to numpy
+        # Convert frame to numpy, but preserve more dynamic range before uint8 conversion
         frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
         frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
         frame_np = (frame_np * 255).astype(np.uint8)
         
+        # Setup video writer
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
         # Create temporary video without audio
-        temp_video_path = str(Path(output_path).with_suffix('.temp.mp4'))
+        temp_video_path = str(output_path.with_suffix('.temp.mp4'))
         
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(
@@ -167,8 +172,8 @@ class AudioVisualizer:
                 video_input, 
                 audio_input, 
                 str(output_path),
-                vcodec='copy',  # Copy video stream to avoid re-encoding
-                acodec='aac'    # Re-encode audio to ensure compatibility
+                vcodec='copy',
+                acodec='aac'
             ).overwrite_output()
             
             try:

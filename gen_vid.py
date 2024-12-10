@@ -70,7 +70,7 @@ def generate_attention_videos(
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate attention visualization videos')
-    parser.add_argument('--checkpoint', type=str, required=False, default='/home/cisco/heyo/densefuck/sound_of_pixels/densebase/outputs/checkpoint_epoch_140.pt',
+    parser.add_argument('--checkpoint', type=str, required=False, default='/home/cisco/heyo/densefuck/sound_of_pixels/densebase/outputs/checkpoint_epoch_30.pt',
                         help='Path to the model checkpoint')
     parser.add_argument('--video_dir', type=str, required=False, default='/home/cisco/heyo/densefuck/sound_of_pixels/dataset/solo_split_videos',
                         help='Directory containing input videos')

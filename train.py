@@ -173,7 +173,21 @@ class AudioVisualTrainer:
                 #print(f"Loss training: {loss}")
                 # Backward pass
                 self.optimizer.zero_grad()
+                
+                # Check weights before backward pass on first iteration
+                if epoch == 0 and step == 0:
+                    weights_before = {name: param.clone().detach() for name, param in self.model.named_parameters()}
+                
                 loss.backward()
+                
+                # Check if weights were updated on first iteration
+                if epoch == 0 and step == 0:
+                    weights_after = {name: param.clone().detach() for name, param in self.model.named_parameters()}
+                    for name in weights_before:
+                        if not torch.equal(weights_before[name], weights_after[name]):
+                            print(f"Weights updated for {name}")
+                        else:
+                            print(f"Warning: Weights not updated for {name}")
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
                 
