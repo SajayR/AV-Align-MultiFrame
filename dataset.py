@@ -14,7 +14,7 @@ import torchaudio.transforms as T
 from torch.cuda.amp import autocast
 import warnings
 warnings.filterwarnings("ignore")
-
+from tqdm import tqdm
 class AudioProcessor:
     def __init__(self, sample_rate=16000, n_mels=128, target_length=300):
         self.sample_rate = sample_rate
@@ -171,10 +171,29 @@ class AudioVisualDataset(Dataset):
                  frame_transform=None,
                  sample_rate: int = 16000,
                  n_mels: int = 128,
-                 target_length: int = 998):  # For 10s clips
+                 target_length: int = 998):
         
-        self.video_paths = sorted([str(p) for p in Path(video_dir).glob("*.mp4")])
         self.frame_transform = frame_transform
+        self.video_paths = []
+        
+        # Find all video files
+        all_videos = sorted([str(p) for p in Path(video_dir).glob("*.mp4")])
+        print(f"Found {len(all_videos)} video files")
+        
+        # Validate videos during initialization
+        print("Validating videos...")
+        for video_path in tqdm(all_videos):
+            try:
+                # Try to open the video and check if it has both video and audio streams
+                container = av.open(video_path)
+                if container.streams.video and container.streams.audio:
+                    self.video_paths.append(video_path)
+                container.close()
+            except Exception as e:
+                print(f"Skipping corrupted video {video_path}: {str(e)}")
+                continue
+        
+        print(f"Successfully loaded {len(self.video_paths)} valid videos")
         
         self.audio_processor = AudioProcessor(
             sample_rate=sample_rate,
@@ -183,50 +202,87 @@ class AudioVisualDataset(Dataset):
         )
     
     def _load_video_frame(self, video_path: str) -> torch.Tensor:
-        """Load middle frame from video"""
-        try:
-            container = av.open(video_path)
-            container.streams.video[0].thread_type = "AUTO"
-            
-            # Get middle frame
-            target_frame = container.streams.video[0].frames // 2 
-            
-            for i, frame in enumerate(container.decode(video=0)):
-                if i == target_frame:
-                    numpy_frame = frame.to_ndarray(format='rgb24')
-                    frame_tensor = torch.from_numpy(numpy_frame).permute(2, 0, 1).float() / 255.0
+        """Load middle frame from video with error handling"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                container = av.open(video_path)
+                if not container.streams.video:
+                    raise ValueError("No video stream found")
+                
+                video_stream = container.streams.video[0]
+                video_stream.thread_type = "AUTO"
+                
+                # Get middle frame
+                total_frames = video_stream.frames
+                if total_frames == 0:
+                    raise ValueError("Video has 0 frames")
                     
-                    if self.frame_transform:
-                        frame_tensor = self.frame_transform(frame_tensor)
-                    return frame_tensor
-                    
-            container.close()
-            
-        except Exception as e:
-            print(f"Error loading video frame from {video_path}: {str(e)}")
-            raise
+                target_frame = total_frames // 2
+                
+                for i, frame in enumerate(container.decode(video=0)):
+                    if i == target_frame:
+                        numpy_frame = frame.to_ndarray(format='rgb24')
+                        frame_tensor = torch.from_numpy(numpy_frame).permute(2, 0, 1).float() / 255.0
+                        
+                        if self.frame_transform:
+                            frame_tensor = self.frame_transform(frame_tensor)
+                            
+                        container.close()
+                        return frame_tensor
+                        
+                raise ValueError("Could not reach target frame")
+                
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    print(f"Failed to load video after {max_retries} attempts: {video_path}")
+                    raise e
+                time.sleep(0.1)  # Small delay before retry
+                
+            finally:
+                try:
+                    container.close()
+                except:
+                    pass
             
     def _load_audio(self, video_path: str) -> torch.Tensor:
-        """Load and process audio"""
-        try:
-            container = av.open(video_path)
-            audio = container.streams.audio[0]
-            
-            audio_frames = []
-            for frame in container.decode(audio=0):
-                audio_frames.append(frame.to_ndarray())
-            
-            waveform = torch.from_numpy(np.concatenate(audio_frames))
-            mel_spec = self.audio_processor(waveform)
-            
-            if torch.isnan(mel_spec).any():
-                raise ValueError("NaN values found in mel_spec!")
+        """Load and process audio with error handling"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                container = av.open(video_path)
+                if not container.streams.audio:
+                    raise ValueError("No audio stream found")
                 
-            return mel_spec
-            
-        except Exception as e:
-            print(f"Error loading audio from {video_path}: {str(e)}")
-            raise
+                audio_stream = container.streams.audio[0]
+                
+                audio_frames = []
+                for frame in container.decode(audio=0):
+                    audio_frames.append(frame.to_ndarray())
+                
+                if not audio_frames:
+                    raise ValueError("No audio frames decoded")
+                    
+                waveform = torch.from_numpy(np.concatenate(audio_frames))
+                mel_spec = self.audio_processor(waveform)
+                
+                if torch.isnan(mel_spec).any():
+                    raise ValueError("NaN values found in mel_spec")
+                    
+                container.close()
+                return mel_spec
+                
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    print(f"Failed to load audio after {max_retries} attempts: {video_path}")
+                    raise e
+                time.sleep(0.1)  # Small delay before retry
+                
+            finally:
+                try:
+                    container.close()
+                except:
+                    pass
     
     def __len__(self):
         return len(self.video_paths)
@@ -234,14 +290,21 @@ class AudioVisualDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         video_path = self.video_paths[idx]
         
-        frame = self._load_video_frame(video_path)
-        mel_spec = self._load_audio(video_path)
-        
-        return {
-            'frame': frame,         # (C, H, W)
-            'mel_spec': mel_spec,   # (T, F)
-            'video_path': video_path
-        }
+        try:
+            frame = self._load_video_frame(video_path)
+            mel_spec = self._load_audio(video_path)
+            
+            return {
+                'frame': frame,
+                'mel_spec': mel_spec,
+                'video_path': video_path
+            }
+            
+        except Exception as e:
+            print(f"Error loading sample {video_path}: {str(e)}")
+            # Return a different valid sample
+            new_idx = (idx + 1) % len(self)
+            return self[new_idx]
 
 class PatchEmbed(nn.Module):
     """

@@ -12,7 +12,7 @@ class AudioVisualizer:
         self.image_size = image_size
         self.num_patches = image_size // patch_size
         
-        # Create a custom colormap (transparent -> red -> yellow)
+        # Create a custom colormap (transparent -> blue -> red -> yellow)
         colors = [
             (0,0,0,0),     # Transparent for low attention
             (0,0,1,0.5),   # Blue for medium-low
@@ -20,7 +20,7 @@ class AudioVisualizer:
             (1,1,0,1)      # Yellow for high attention
         ]
         self.cmap = LinearSegmentedColormap.from_list('custom', colors)
-        
+    
     def get_attention_maps(self, model, frame, audio):
         """Get attention maps for each audio token"""
         model.eval()
@@ -68,7 +68,7 @@ class AudioVisualizer:
         overlay = ((1-alpha) * frame + alpha * heatmap_bgr).astype(np.uint8)
         return overlay
     
-    def make_attention_video(self, model, frame, audio, output_path, video_path=None):
+    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=100):
         """Create attention visualization video - synchronized to 10s duration"""
         attention_maps = self.get_attention_maps(model, frame, audio)
         
@@ -76,11 +76,6 @@ class AudioVisualizer:
         frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
         frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
         frame_np = (frame_np * 255).astype(np.uint8)
-        
-        # Calculate FPS to match audio duration exactly
-        num_frames = len(attention_maps)
-        duration = 10  # seconds
-        fps = num_frames / duration  # Should be around 100 for our 998 frames
         
         # Setup video writer
         output_path = Path(output_path)
@@ -128,15 +123,31 @@ class AudioVisualizer:
         else:
             Path(temp_video_path).rename(output_path)
             
-    def plot_attention_snapshot(self, model, frame, audio, num_timesteps=8):
-        """Plot attention maps at different timesteps"""
+    def plot_attention_snapshot(self, model, frame, audio, num_timesteps=5, axes=None, fig=None):
+        """
+        Plot attention maps at different timesteps
+        
+        Args:
+            model: The audio-visual model
+            frame: Input frame tensor
+            audio: Input audio tensor
+            num_timesteps: Number of timesteps to visualize
+            axes: Optional matplotlib axes for subplot (array-like)
+            fig: Optional matplotlib figure
+        """
         attention_maps = self.get_attention_maps(model, frame, audio)
         frame_np = (frame.squeeze(0).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
         
         # Select evenly spaced timesteps
         timesteps = np.linspace(0, len(attention_maps)-1, num_timesteps).astype(int)
         
-        fig, axes = plt.subplots(1, num_timesteps, figsize=(2*num_timesteps, 4))
+        # Create figure and axes if not provided
+        if axes is None:
+            fig, axes = plt.subplots(1, num_timesteps, figsize=(2*num_timesteps, 4))
+            created_fig = True
+        else:
+            created_fig = False
+            
         if num_timesteps == 1:
             axes = [axes]
             
@@ -147,9 +158,12 @@ class AudioVisualizer:
             ax.set_title(f'Time: {t/99:.1f}s')  # Assuming 998 frames for 10s
             ax.axis('off')
             
-        plt.tight_layout()
-        plt.savefig('outputs/attention_snapshot.png')
-        plt.close()
+        if created_fig:
+            plt.tight_layout()
+            plt.savefig('outputs/attention_snapshot.png')
+            plt.close()
+        
+        return fig if created_fig else None
 
 if __name__ == "__main__":
     # Test visualization
