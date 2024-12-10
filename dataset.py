@@ -202,8 +202,10 @@ class AudioVisualDataset(Dataset):
         )
     
     def _load_video_frame(self, video_path: str) -> torch.Tensor:
-        """Load middle frame from video with error handling"""
+        """Load middle frame from video with error handling and proper resource cleanup"""
         max_retries = 3
+        container = None
+        
         for attempt in range(max_retries):
             try:
                 container = av.open(video_path)
@@ -228,7 +230,6 @@ class AudioVisualDataset(Dataset):
                         if self.frame_transform:
                             frame_tensor = self.frame_transform(frame_tensor)
                             
-                        container.close()
                         return frame_tensor
                         
                 raise ValueError("Could not reach target frame")
@@ -240,10 +241,12 @@ class AudioVisualDataset(Dataset):
                 time.sleep(0.1)  # Small delay before retry
                 
             finally:
-                try:
-                    container.close()
-                except:
-                    pass
+                # Ensure container is always closed, even if an error occurs
+                if container:
+                    try:
+                        container.close()
+                    except:
+                        pass
             
     def _load_audio(self, video_path: str) -> torch.Tensor:
         """Load and process audio with error handling"""

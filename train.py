@@ -11,6 +11,18 @@ from dataset import AudioVisualDataset, VideoBatchSampler
 from viz import AudioVisualizer
 import numpy as np
 import matplotlib.pyplot as plt
+import psutil
+import gc
+
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    process = psutil.Process()
+    mem_gb = process.memory_info().rss / 1024 / 1024 / 1024
+    return mem_gb
+
+def log_memory(step, location=""):
+    mem_gb = get_memory_usage()
+    print(f"Step {step} - {location} - Memory usage: {mem_gb:.2f} GB")
 
 class AudioVisualTrainer:
     def __init__(
@@ -108,53 +120,70 @@ class AudioVisualTrainer:
         return vis_samples
     
     def create_visualization(self, epoch: int, step: int):
-        """Create visualizations for multiple samples"""
-        fig, axes = plt.subplots(self.num_vis_samples, 5, 
-                               figsize=(20, 4*self.num_vis_samples))
-        
-        for i in range(self.num_vis_samples):
-            self.visualizer.plot_attention_snapshot(
-                self.model,
-                self.vis_samples['frames'][i:i+1],
-                self.vis_samples['mel_specs'][i:i+1],
-                num_timesteps=5,
-                axes=axes[i] if self.num_vis_samples > 1 else axes
-            )
-        
-        if self.use_wandb:
-            wandb.log({
-                "attention_snapshots": wandb.Image(plt),
-                "epoch": epoch,
-                "step": step
-            })
-        
-        plt.close()
-        
-        # Save attention videos every epoch
-        if epoch % 1 == 0:
+        """Create visualizations for multiple samples with memory cleanup"""
+        try:
+            fig, axes = plt.subplots(self.num_vis_samples, 5, 
+                                figsize=(20, 4*self.num_vis_samples))
+            
             for i in range(self.num_vis_samples):
-                video_path = self.output_dir / f'attention_epoch_{epoch}_sample_{i}.mp4'
-                
-                self.visualizer.make_attention_video(
+                # Create visualization
+                self.visualizer.plot_attention_snapshot(
                     self.model,
                     self.vis_samples['frames'][i:i+1],
                     self.vis_samples['mel_specs'][i:i+1],
-                    video_path,
-                    video_path=self.vis_samples['video_paths'][i]
+                    num_timesteps=5,
+                    axes=axes[i] if self.num_vis_samples > 1 else axes
                 )
                 
-                if self.use_wandb:
-                    wandb.log({
-                        f"attention_video_{i}": wandb.Video(str(video_path)),
-                        "epoch": epoch,
-                        "step": step
-                    })
+                torch.cuda.empty_cache()  # Clear GPU memory after each sample
+            
+            if self.use_wandb:
+                wandb.log({
+                    "attention_snapshots": wandb.Image(plt),
+                    "epoch": epoch,
+                    "step": step
+                })
+            
+            plt.close('all')  # Important: close all figures
+            
+            # Only save videos every few epochs to reduce memory pressure
+            if epoch % 5 == 0:  # Adjust this number as needed
+                for i in range(self.num_vis_samples):
+                    video_path = self.output_dir / f'attention_epoch_{epoch}_sample_{i}.mp4'
+                    
+                    # Clear memory before video creation
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    
+                    self.visualizer.make_attention_video(
+                        self.model,
+                        self.vis_samples['frames'][i:i+1],
+                        self.vis_samples['mel_specs'][i:i+1],
+                        video_path,
+                        video_path=self.vis_samples['video_paths'][i]
+                    )
+                    
+                    if self.use_wandb:
+                        wandb.log({
+                            f"attention_video_{i}": wandb.Video(str(video_path)),
+                            "epoch": epoch,
+                            "step": step
+                        })
+                    
+                    # Clear memory after each video
+                    torch.cuda.empty_cache()
+                    gc.collect()
+        
+        finally:
+            plt.close('all')  # Ensure figures are closed even if there's an error
+            torch.cuda.empty_cache()
     
     def train(self, num_epochs: int):
         step = 0
         best_loss = float('inf')
         
         for epoch in range(num_epochs):
+            log_memory(step, "Start of epoch")
             self.model.train()
             epoch_losses = []
             
@@ -171,27 +200,27 @@ class AudioVisualTrainer:
                 # Backward pass
                 self.optimizer.zero_grad()
                 loss.backward()
-                
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
                 
-                # Log loss
-                loss_value = loss.item()
-                epoch_losses.append(loss_value)
-                pbar.set_postfix({'loss': f'{loss_value:.4f}'})
+                # Clear some memory
+                del frames, audio, loss
+                torch.cuda.empty_cache()
                 
-                if self.use_wandb:
-                    wandb.log({
-                        'step_loss': loss_value,
-                        'epoch': epoch,
-                        'step': step
-                    })
+                if step % 100 == 0:
+                    log_memory(step, "During training")
+                    gc.collect()  # Force garbage collection
                 
-                # Visualization
+                # Visualization with memory cleanup
                 if step % self.vis_every == 0:
-                    self.create_visualization(epoch, step)
+                    with torch.no_grad():
+                        self.create_visualization(epoch, step)
+                    plt.close('all')  # Close all matplotlib figures
+                    gc.collect()
                 
                 step += 1
+                
+            log_memory(step, "End of epoch")
             
             # End of epoch
             epoch_loss = np.mean(epoch_losses)
