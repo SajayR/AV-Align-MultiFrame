@@ -81,7 +81,7 @@ class AudioVisualModel(nn.Module):
         clip_sims = torch.mean(max_sims, dim=2)     # Mean over audio dimension
         
         return clip_sims, token_sims
-        
+
     def compute_contrastive_loss(self, clip_similarities, token_sims):
         """Compute InfoNCE loss with regularization"""
         batch_size = clip_similarities.shape[0]

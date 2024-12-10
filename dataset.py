@@ -15,6 +15,8 @@ from torch.cuda.amp import autocast
 import warnings
 warnings.filterwarnings("ignore")
 from tqdm import tqdm
+import gc
+import time
 class AudioProcessor:
     def __init__(self, sample_rate=16000, n_mels=128, target_length=300):
         self.sample_rate = sample_rate
@@ -200,6 +202,8 @@ class AudioVisualDataset(Dataset):
             n_mels=n_mels,
             target_length=target_length
         )
+        self.av_cleanup_policy = "even"  # or "all"
+        av.logging.set_level(av.logging.ERROR)
     
     def _load_video_frame(self, video_path: str) -> torch.Tensor:
         """Load middle frame from video with error handling and proper resource cleanup"""
@@ -308,6 +312,10 @@ class AudioVisualDataset(Dataset):
             # Return a different valid sample
             new_idx = (idx + 1) % len(self)
             return self[new_idx]
+
+        finally:
+            gc.collect()
+            #av.logging.restore_level()
 
 class PatchEmbed(nn.Module):
     """
