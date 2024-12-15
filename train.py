@@ -43,8 +43,8 @@ class AudioVisualTrainer:
         num_epochs: int = 400,
         learning_rate: float = 1e-3,
         num_workers: int = 12,
-        vis_every: int = 500,
-        num_vis_samples: int = 2,
+        vis_every: int = 1000,
+        num_vis_samples: int = 10,
         device: str = 'cuda',
         use_wandb: bool = False,
         force_new_training: bool = False,
@@ -387,8 +387,12 @@ if __name__ == "__main__":
         batch_size=48,
         num_epochs=500,
         learning_rate=8e-4,
-        use_wandb=False,
+        use_wandb=True,
         num_vis_samples=10,
-        gradient_accumulation_steps=1  # Example accumulation step
+        gradient_accumulation_steps=1,  # Example accumulation step
+        vis_every=1000,
+        num_workers=12,
+        force_new_training=False,
+
     )
     trainer.train()

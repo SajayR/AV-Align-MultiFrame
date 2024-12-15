@@ -133,25 +133,39 @@ class VideoBatchSampler(Sampler):
                 self.vid_to_indices[vid] = []
             self.vid_to_indices[vid].append(i)
             
+        # Store total number of samples for length calculation
+        self.total_samples = len(vid_nums)
+            
     def __iter__(self):
-        # Get unique vid_nums
-        unique_vids = list(self.vid_to_indices.keys())
-        random.shuffle(unique_vids)  # Shuffle at epoch start
+        # Create a list of all indices
+        all_indices = list(range(self.total_samples))
+        random.shuffle(all_indices)
         
-        while len(unique_vids) >= self.batch_size:
-            batch_vids = unique_vids[:self.batch_size]
+        # Create batches
+        current_batch = []
+        used_vids = set()  # Track videos used in current batch
+        
+        for idx in all_indices:
+            vid = self.vid_nums[idx]
             
-            # For each selected video, randomly pick one of its segments
-            batch = []
-            for vid in batch_vids:
-                idx = random.choice(self.vid_to_indices[vid])
-                batch.append(idx)
-            
-            yield batch
-            unique_vids = unique_vids[self.batch_size:]
+            # If this video hasn't been used in current batch
+            if vid not in used_vids:
+                current_batch.append(idx)
+                used_vids.add(vid)
+                
+                # If batch is full, yield it
+                if len(current_batch) == self.batch_size:
+                    yield current_batch
+                    current_batch = []
+                    used_vids = set()
+        
+        # Don't forget the last batch if it exists
+        if current_batch:
+            yield current_batch
     
     def __len__(self):
-        return len(set(self.vid_nums)) // self.batch_size
+        # Approximate number of batches
+        return self.total_samples // self.batch_size
 
 
 class AudioVisualDataset(Dataset):
