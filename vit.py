@@ -6,7 +6,9 @@ class ViTEmbedder(nn.Module):
     def __init__(self, model_name='vit_base_patch16_224', pretrained=True):
         super().__init__()
         
-        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14') #torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+
+        self.projection = nn.Linear(384, 512)
         
         for param in self.model.parameters():
             param.requires_grad = True
@@ -20,6 +22,7 @@ class ViTEmbedder(nn.Module):
         """
         # Get intermediate features
         x = self.model.get_intermediate_layers(x, n=1)[0]
+        x = self.projection(x)
         
         # x now includes both CLS token and patch tokens
         # Remove CLS token (first token) if you want just patches

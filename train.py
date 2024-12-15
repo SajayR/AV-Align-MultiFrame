@@ -43,7 +43,7 @@ class AudioVisualTrainer:
         num_epochs: int = 400,
         learning_rate: float = 1e-3,
         num_workers: int = 12,
-        vis_every: int = 200,
+        vis_every: int = 500,
         num_vis_samples: int = 2,
         device: str = 'cuda',
         use_wandb: bool = False,
@@ -53,7 +53,7 @@ class AudioVisualTrainer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.vis_every = vis_every
-        self.device = device
+        self.device = device 
         self.use_wandb = use_wandb
         self.num_vis_samples = num_vis_samples
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -249,6 +249,7 @@ class AudioVisualTrainer:
 
             # Only save videos every few epochs
             if epoch % 1 == 0:
+                print(f"Saving attention videos for epoch {epoch}")
                 for i in range(self.num_vis_samples):
                     video_path = self.output_dir / f'attention_epoch{epoch}_sample{i}.mp4'
                     
@@ -310,7 +311,24 @@ class AudioVisualTrainer:
 
                 if accumulation_counter % self.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    
+                    # Store initial parameters
+                    #initial_params = {}
+                    #for name, param in self.model.named_parameters():
+                    #    initial_params[name] = param.data.clone()
+                    
                     self.optimizer.step()
+                    
+                    # Check which layers were updated
+                    #print("\nChecking layer updates:")
+                    #for name, param in self.model.named_parameters():
+                    #    if param.grad is not None:
+                    #        diff = torch.sum(torch.abs(param.data - initial_params[name])).item()
+                    #        if diff > 0:
+                    #            print(f"{name}: Updated (diff={diff:.6f})")
+                    #        else:
+                    #            print(f"{name}: No change")
+                    
                     self.optimizer.zero_grad()
 
                 if self.use_wandb:
@@ -330,7 +348,7 @@ class AudioVisualTrainer:
                 if self.global_step % 100 == 0:
                     gc.collect()
 
-                if self.global_step % self.vis_every == 0 and accumulation_counter % self.gradient_accumulation_steps == 0:
+                if self.global_step % self.vis_every == 0:
                     with torch.no_grad():
                         self.create_visualization(epoch, self.global_step)
                     plt.close('all')
@@ -366,11 +384,11 @@ if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/densetok/densefuckfuckfuck/vggsound_split_1seconds',
         output_dir='./outputs',
-        batch_size=16,
+        batch_size=48,
         num_epochs=500,
-        learning_rate=5e-4,
-        use_wandb=True,
+        learning_rate=8e-4,
+        use_wandb=False,
         num_vis_samples=10,
-        gradient_accumulation_steps=4  # Example accumulation step
+        gradient_accumulation_steps=1  # Example accumulation step
     )
     trainer.train()
