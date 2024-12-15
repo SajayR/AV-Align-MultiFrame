@@ -2,21 +2,28 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vit import ViTEmbedder
-from dataset import ASTEmbedder
-
+from hubert import AudioEmbedder
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import warnings
+warnings.filterwarnings("ignore")
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=0.2):
+    def __init__(self, temperature=1.0):
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
-        self.audio_embedder = ASTEmbedder()
+        self.audio_embedder = AudioEmbedder()
         self.temperature = nn.Parameter(torch.tensor(temperature))
         
-    def compute_similarity_matrix(self, audio_feats, visual_feats):
+        # Unfreeze the HuBERT model
+        for param in self.audio_embedder.hubert.parameters():
+            param.requires_grad = True
+        
+        for param in self.audio_embedder.projection.parameters():
+            param.requires_grad = True
+        
+    def compute_similarity_matrix(self, audio_feats, visual_feats): #ye take this
         """
         Compute pairwise cosine similarities between audio and visual tokens
         
@@ -32,8 +39,8 @@ class AudioVisualModel(nn.Module):
         #print("Visual feats stats before norm - min:", visual_feats.min().item(), "max:", visual_feats.max().item())
         
         # Normalize embeddings
-        audio_feats = F.normalize(audio_feats, dim=-1)
-        visual_feats = F.normalize(visual_feats, dim=-1)
+        audio_feats = F.normalize(audio_feats, dim=-1)  #this has to be checked if we wanna fucking normalize the embeddings
+        visual_feats = F.normalize(visual_feats, dim=-1) #same
         
         # Compute similarities and check values
         similarity = torch.bmm(audio_feats, visual_feats.transpose(1, 2))
@@ -42,7 +49,7 @@ class AudioVisualModel(nn.Module):
         
         return similarity / self.temperature
     
-    def aggregate_token_similarities(self, similarity_matrix):
+    def aggregate_token_similarities(self, similarity_matrix): #also take this
         """
         Aggregate token-level similarities using max-mean strategy
         
@@ -65,7 +72,8 @@ class AudioVisualModel(nn.Module):
         
         audio_feats = audio_feats.unsqueeze(1).expand(-1, B, -1, -1)
         visual_feats = visual_feats.unsqueeze(0).expand(B, -1, -1, -1)
-        
+        #print("During compute_all_similarities")
+        #print(audio_feats.shape, visual_feats.shape)
         # Normalize features
         audio_feats = F.normalize(audio_feats, dim=-1)
         visual_feats = F.normalize(visual_feats, dim=-1)
@@ -77,8 +85,8 @@ class AudioVisualModel(nn.Module):
         ) / self.temperature
         
         # Aggregate using max-mean strategy
-        max_sims = torch.max(token_sims, dim=3)[0]  # Max over visual dimension
-        clip_sims = torch.mean(max_sims, dim=2)     # Mean over audio dimension
+        max_sims = torch.max(token_sims, dim=3)[0]  # Max over visual dimension (B, B, Na)
+        clip_sims = torch.mean(max_sims, dim=2)     # Mean over audio dimension (B, B)
         
         return clip_sims, token_sims
 
@@ -102,10 +110,11 @@ class AudioVisualModel(nn.Module):
         reg_loss = self.compute_regularization_losses(clip_similarities, token_sims)
         
         total_loss = contrastive_loss + reg_loss
-        
+        #print("Regularization loss", reg_loss)
+        #print("Contrastive loss", contrastive_loss)
         return total_loss
     
-    def compute_regularization_losses(self, clip_sims, token_sims):
+    '''def compute_regularization_losses(self, clip_sims, token_sims):
         """Compute regularization terms"""
         
         # 1. Non-negative pressure - encourage positive evidence
@@ -140,9 +149,38 @@ class AudioVisualModel(nn.Module):
                     0.01 * l_spatial + 
                     0.01 * l_sparsity)  # Can adjust this weight to control sparsity strength
                     
+        return reg_loss'''
+    
+    def compute_regularization_losses(self, clip_sims, token_sims):
+        """Compute regularization terms"""
+        
+        # 1. Non-negative pressure with clamped range
+        neg_sims = torch.clamp(token_sims, min=-20, max=0)  
+        l_nonneg = torch.mean(neg_sims ** 2)
+        
+        # 2. Temperature/Calibration stability using softplus for smoother gradients
+        l_cal = F.softplus(1.0 - self.temperature) + F.softplus(self.temperature - 5.0)
+        
+        # 3. Spatial smoothness using L1 norm
+        spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
+        l_spatial = torch.mean(torch.abs(spatial_diffs))
+        
+        # 4. Sparsity loss with polynomial growth
+        attn_norm = torch.sigmoid(token_sims)  # [B, B, Na, Nv]
+        threshold = 0.5  # Attention threshold
+        above_threshold = F.relu(attn_norm - threshold)
+        num_high_attn = torch.sum(above_threshold, dim=-1)  # [B, B, Na]
+        l_sparsity = torch.mean(num_high_attn ** 2)  # Polynomial instead of exponential
+        
+        # Combine with reduced weights
+        reg_loss = (0.001 * l_nonneg + 
+                    0.01 * l_cal + 
+                    0.001 * l_spatial + 
+                    0.001 * l_sparsity)
+                    
         return reg_loss
         
-    def forward(self, frames, spectrograms):
+    def forward(self, frames, audio):
         """
         Forward pass computing embeddings, similarities and loss
         
@@ -155,7 +193,7 @@ class AudioVisualModel(nn.Module):
         """
         # Get embeddings
         visual_feats = self.visual_embedder(frames)
-        audio_feats = self.audio_embedder(spectrograms)
+        audio_feats = self.audio_embedder(audio)
         
         if self.training:
             # Get similarities and token-level similarities
@@ -164,7 +202,7 @@ class AudioVisualModel(nn.Module):
         else:
             # During inference, just get clip similarities
             token_sims = self.compute_similarity_matrix(audio_feats, visual_feats)
-            return self.aggregate_token_similarities(token_sims)
+            return token_sims
 
 if __name__ == "__main__":
     # Test the model
@@ -173,15 +211,15 @@ if __name__ == "__main__":
     # Create dummy batch
     batch_size = 4
     frames = torch.randn(batch_size, 3, 224, 224)
-    specs = torch.randn(batch_size, 300, 128)
+    audio = torch.randn(batch_size, 16331)
     
     # Test training mode
-    loss = model(frames, specs)
+    loss = model(frames, audio)
     print(f"Training loss: {loss.item()}")
     
     # Test inference mode
     model.eval()
-    with torch.no_grad():
-        similarities = model(frames, specs)
-        print(f"Inference similarities shape: {similarities.shape}")  # Should be (batch_size)
-        print(f"Similarity values: {similarities}")
+    
+    similarities = model(frames, audio)
+    print(f"Inference similarities shape: {similarities.shape}")  # Should be (batch_size)
+    print(f"Similarity values: {similarities}")

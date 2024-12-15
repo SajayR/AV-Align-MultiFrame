@@ -6,14 +6,10 @@ class ViTEmbedder(nn.Module):
     def __init__(self, model_name='vit_base_patch16_224', pretrained=True):
         super().__init__()
         
-        # Load pretrained ViT
-        self.model = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=0  # Remove classification head
-        )
+        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14') #torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+
+        self.projection = nn.Linear(384, 512)
         
-        # Freeze the model parameters (optional, we can discuss if you wanna fine-tune)
         for param in self.model.parameters():
             param.requires_grad = True
             
@@ -24,17 +20,20 @@ class ViTEmbedder(nn.Module):
         Returns:
             patch_embeddings: (batch_size, num_patches, embedding_dim)
         """
-        x = self.model.forward_features(x)  # Get patch embeddings
+        # Get intermediate features
+        x = self.model.get_intermediate_layers(x, n=1)[0]
+        x = self.projection(x)
         
-        # Remove CLS token if present (first token)
-        if hasattr(self.model, 'cls_token'):
-            x = x[:, 1:, :]
-            
+        # x now includes both CLS token and patch tokens
+        # Remove CLS token (first token) if you want just patches
+        #patch_tokens = x[:, 1:, :]  # Remove CLS token
+        
         return x
 
 # Test it out!
 if __name__ == "__main__":
-    vit = ViTEmbedder()
+    vit = ViTEmbedder().to("cuda")
+    
     # Print total number of parameters
     total_params = sum(p.numel() for p in vit.parameters())
     print(f"Total parameters: {total_params:,}")
@@ -44,7 +43,7 @@ if __name__ == "__main__":
     print(vit.model)
     
     # Create dummy batch of images
-    batch = torch.randn(4, 3, 224, 224)
+    batch = torch.randn(4, 3, 224, 224, device="cuda")
     
     # Get embeddings
     with torch.no_grad():
