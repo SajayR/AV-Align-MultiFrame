@@ -41,8 +41,8 @@ class AudioVisualTrainer:
         batch_size: int = 32,
         num_epochs: int = 400,
         learning_rate: float = 1e-3,
-        num_workers: int = 1,
-        vis_every: int = 250,
+        num_workers: int = 12,
+        vis_every: int = 400,
         num_vis_samples: int = 2,
         device: str = 'cuda',
         use_wandb: bool = False,
@@ -108,7 +108,7 @@ class AudioVisualTrainer:
             num_workers=self.config['num_workers'],
             persistent_workers=True,
             pin_memory=True,
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
         )
 
         # Initialize model and optimizer
@@ -258,7 +258,7 @@ class AudioVisualTrainer:
             plt.close('all')
 
             # Only save videos every few epochs
-            if epoch % 5 == 0:
+            if epoch % 2 == 0:
                 for i in range(self.num_vis_samples):
                     video_path = self.output_dir / f'attention_epoch{epoch}_sample{i}.mp4'
                     
@@ -296,7 +296,32 @@ class AudioVisualTrainer:
                 self.optimizer,
                 T_max=self.config['num_epochs'] - self.start_epoch
             )
-        batch_start_time = None
+        # Store initial model parameters
+        #initial_params = {}
+        #for name, param in self.model.named_parameters():
+          # initial_params[name] = param.clone().detach()
+        
+        '''def check_param_updates():
+            """Compare current parameters with initial values"""
+            with torch.no_grad():
+                unchanged_params = []
+                changed_params = []
+                for name, param in self.model.named_parameters():
+                    if torch.allclose(param, initial_params[name]):
+                        unchanged_params.append(name)
+                    else:
+                        changed_params.append(name)
+                
+                if len(unchanged_params) > 0:
+                    print("\nParameters that did not change:")
+                    for name in unchanged_params:
+                        print(f"- {name}")
+                
+                print("\nParameters that were updated:")
+                for name in changed_params:
+                    print(f"- {name}")
+                print()'''
+        #batch_start_time = None
         for epoch in range(self.start_epoch, self.config['num_epochs']):
             self.model.train()
             epoch_losses = []
@@ -304,20 +329,34 @@ class AudioVisualTrainer:
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for batch in pbar:
                 #if batch_start_time is None:
-                #    batch_start_time = time.time()
+                   # batch_start_time = time.time()
                 #else:
-                #    batch_end_time = time.time()
-                #    print(f"Batch time: {batch_end_time - batch_start_time:.4f} seconds")
-                #    batch_start_time = batch_end_time
+                    #batch_end_time = time.time()
+                    #print(f"Batch time: {batch_end_time - batch_start_time:.4f} seconds")
+                    #batch_start_time = batch_end_time
 
                 self.model.train()
                 frames = batch['frame'].to(self.device)
                 audio = batch['audio'].to(self.device)
                 #model_start_time = time.time()
                 loss = self.model(frames, audio)
+                if loss.item() > 10:  # Skip absurd losses
+                    print(f"Skipping batch with loss: {loss.item():.4f}")
+                    continue
         
                 self.optimizer.zero_grad()
                 loss.backward()
+                # After loss.backward()
+                #print("Checking HuBERT gradients...")
+                #has_grad = False
+                #for name, param in self.model.audio_embedder.hubert.named_parameters():
+                    #print(name, param.requires_grad)
+                    #if param.grad is not None and torch.sum(torch.abs(param.grad)) > 0:
+                    #    has_grad = True
+                    #    print(f"Found gradient in {name}")
+                    #    break
+                #   if not has_grad:
+                    #print("No gradients found in HuBERT parameters!")
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
                 #model_end_time = time.time()
@@ -327,6 +366,7 @@ class AudioVisualTrainer:
                     wandb.log({
                         "train_loss": loss.item(),
                         "temperature": self.model.temperature.item(),
+                        "lr": self.scheduler.get_last_lr()[0]
                     })
 
                 loss_value = loss.item()
@@ -344,8 +384,12 @@ class AudioVisualTrainer:
                         self.create_visualization(epoch, self.global_step)
                     plt.close('all')
                     gc.collect()
+                
+                #if self.global_step == 3:
+                 #   check_param_updates()
 
                 self.global_step += 1
+            
 
             epoch_loss = np.mean(epoch_losses)
             self.logger.info(f'Epoch {epoch} - Loss: {epoch_loss:.4f}')
@@ -364,7 +408,7 @@ class AudioVisualTrainer:
             self.scheduler.step()
 
             # Regular checkpoint every 10 epochs
-            if epoch % 10 == 0:
+            if epoch % 5 == 0:
                 self.save_checkpoint(epoch, self.global_step)
 
         print("Training completed!")
@@ -374,11 +418,11 @@ if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/densetok/densefuckfuckfuck/vggsound_split_1seconds',
         output_dir='./outputs',
-        batch_size=32,
+        batch_size=12,
         num_epochs=500,
         learning_rate=5e-4,
         use_wandb=True,
-        num_vis_samples=12
+        num_vis_samples=10
     )
     trainer.train()
 
