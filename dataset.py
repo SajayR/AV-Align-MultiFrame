@@ -104,7 +104,7 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
     for frame in processed_frames:
         resized = torch.nn.functional.interpolate(
             frame.permute(2, 0, 1).unsqueeze(0),  # [1, C, H, W]
-            size=(256, 256),
+            size=(224, 224),
             mode='bilinear',
             align_corners=False
         )
@@ -177,21 +177,18 @@ class AudioVisualDataset(Dataset):
         video_path = self.video_files[idx]
         audio = extract_audio_from_video(video_path)
         video_frames = load_and_preprocess_video(video_path, self.sample_fps)
-        print("video_frames", video_frames.shape)
+        #print("video_frames", video_frames.shape)
         return {
-            'video_path': video_path,
+            'video_path': str(video_path),
             'video_frames': video_frames, 
             'audio': audio,
             'vid_num': int(video_path.stem.split('_')[0]),
             'segment_num': int(video_path.stem.split('_')[1]),
-            'video_path': video_path,
         }
-
-
+        
 
 def collate_fn(batch):
     # Get all tokens (already processed)
-    print("collate_fn")
     video_tokens = torch.stack([item['video_frames'] for item in batch])
     max_audio_len = max(item['audio'].shape[0] for item in batch)
     audio_padded = torch.zeros(len(batch), max_audio_len)
@@ -200,11 +197,11 @@ def collate_fn(batch):
         audio_padded[i, :audio_len] = item['audio']
     
     return {
-        'video_tokens': video_tokens,
+        'frame': video_tokens,
         'audio': audio_padded,
-        #'vid_nums': [item['vid_num'] for item in batch],
-        #'segment_nums': [item['segment_num'] for item in batch],
-        'video_paths': [item['video_path'] for item in batch]
+        'vid_nums': [item['vid_num'] for item in batch],
+        'segment_nums': [item['segment_num'] for item in batch],
+        'video_paths': [str(item['video_path']) for item in batch]  # Convert PosixPath to string
     }
 
 if __name__ == "__main__":

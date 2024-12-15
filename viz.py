@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
 class AudioVisualizer:
-    def __init__(self, patch_size=16, image_size=224):
+    def __init__(self, patch_size=14, image_size=224):
         self.patch_size = patch_size
         self.image_size = image_size
         self.num_patches = image_size // patch_size
@@ -20,6 +20,23 @@ class AudioVisualizer:
             (1,1,0,1)      # Yellow for high attention
         ]
         self.cmap = LinearSegmentedColormap.from_list('custom', colors)
+
+    def _validate_inputs(self, frame, audio):
+        """Validate that inputs are properly normalized"""
+        # Check ImageNet normalization ranges (approximately)
+        #print("Frames: ", frame.shape)
+        #print("Audio: ", audio.shape)
+        frame_min, frame_max = frame.min().item(), frame.max().item()
+        # For reference:
+        # Black frame (0-mean)/std gives us negative values around -2
+        # White frame (1-mean)/std gives us positive values around 2
+        assert -3 <= frame_min <= 3, f"Frame min {frame_min} outside expected ImageNet normalized range"
+        assert -3 <= frame_max <= 3, f"Frame max {frame_max} outside expected ImageNet normalized range"
+        
+        # Check audio normalization
+        audio_min, audio_max = audio.min().item(), audio.max().item()
+        assert -1 <= audio_min <= 1, f"Audio min {audio_min} outside normalized range"
+        assert -1 <= audio_max <= 1, f"Audio max {audio_max} outside normalized range"
     
     def get_attention_maps(self, model, frame, audio):
         """Get attention maps for each audio token"""
@@ -68,16 +85,26 @@ class AudioVisualizer:
         overlay = ((1-alpha) * frame + alpha * heatmap_bgr).astype(np.uint8)
         return overlay
     
-    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=100):
-        """Create attention visualization video - synchronized to 10s duration"""
+    def make_attention_video(self, model, frame, audio, output_path, video_path=None, fps=50):
+        """Create attention visualization video - synchronized to 1s duration
+        Args:
+            frame: ImageNet normalized frame tensor [1, C, H, W]
+            audio: normalized audio tensor [1, T] 
+        """
+        self._validate_inputs(frame, audio)
         attention_maps = self.get_attention_maps(model, frame, audio)
         
-        # Process frame
+        # Process frame - CORRECT WAY TO DENORMALIZE IMAGENET NORMALIZED INPUTS
         frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
-        frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
-        frame_np = (frame_np * 255).astype(np.uint8)
+        # Denormalize from ImageNet normalization
+        mean = np.array([0.485, 0.456, 0.406]).reshape(1,1,3)
+        std = np.array([0.229, 0.224, 0.225]).reshape(1,1,3)
+        frame_np = frame_np * std + mean
         
-        # Setup video writer
+        # Clip to valid range and convert to uint8
+        frame_np = np.clip(frame_np * 255, 0, 255).astype(np.uint8)
+        
+        # Rest of your video writing code...
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_video_path = str(output_path.with_suffix('.temp.mp4'))
@@ -129,14 +156,23 @@ class AudioVisualizer:
         
         Args:
             model: The audio-visual model
-            frame: Input frame tensor
-            audio: Input audio tensor
+            frame: ImageNet normalized frame tensor [1, C, H, W]
+            audio: Normalized audio tensor [1, T]
             num_timesteps: Number of timesteps to visualize
             axes: Optional matplotlib axes for subplot (array-like)
             fig: Optional matplotlib figure
         """
+        self._validate_inputs(frame, audio)
         attention_maps = self.get_attention_maps(model, frame, audio)
-        frame_np = (frame.squeeze(0).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+        
+        # Denormalize frame from ImageNet normalization
+        frame_np = frame.squeeze(0).permute(1,2,0).cpu().numpy()
+        mean = np.array([0.485, 0.456, 0.406]).reshape(1,1,3)
+        std = np.array([0.229, 0.224, 0.225]).reshape(1,1,3)
+        frame_np = frame_np * std + mean
+        
+        # Convert to uint8 for visualization
+        frame_np = np.clip(frame_np * 255, 0, 255).astype(np.uint8)
         
         # Select evenly spaced timesteps
         timesteps = np.linspace(0, len(attention_maps)-1, num_timesteps).astype(int)
@@ -168,21 +204,51 @@ class AudioVisualizer:
 if __name__ == "__main__":
     # Test visualization
     from model import AudioVisualModel
-    model = AudioVisualModel()
+    model = AudioVisualModel().eval()  # Make sure model is in eval mode
     visualizer = AudioVisualizer()
     
-    # Create dummy data
-    frame = torch.randn(1, 3, 224, 224)
-    audio = torch.randn(1, 998, 128)  # Updated for 10s clips
+    # Create properly normalized test frames
+    # White background
+    white_frame = torch.ones(1, 3, 224, 224)  # Start with ones
+    # Apply ImageNet normalization
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
+    white_frame = (white_frame - mean) / std
+
+    # Black background
+    black_frame = torch.zeros(1, 3, 224, 224)  # Start with zeros
+    black_frame = (black_frame - mean) / std
+
+    # Create normalized audio (between -1 and 1)
+    # Using sin wave for better visualization than random noise
+    t = torch.linspace(0, 2*torch.pi, 16331)
+    audio = torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)  # 440Hz tone
     
-    # Test video creation
+    print("Frame ranges:")
+    print(f"White frame: min={white_frame.min():.3f}, max={white_frame.max():.3f}")
+    print(f"Black frame: min={black_frame.min():.3f}, max={black_frame.max():.3f}")
+    print(f"Audio range: min={audio.min():.3f}, max={audio.max():.3f}")
+    
+    # Test with white background
+    print("\nCreating visualization with white background...")
     visualizer.make_attention_video(
-        model, frame, audio,
-        'test_attention.mp4'
+        model, white_frame, audio,
+        'test_attention_white.mp4'
     )
-    
-    # Test snapshot visualization
     visualizer.plot_attention_snapshot(
-        model, frame, audio,
+        model, white_frame, audio,
         num_timesteps=8
     )
+    
+    # Test with black background
+    print("\nCreating visualization with black background...")
+    visualizer.make_attention_video(
+        model, black_frame, audio,
+        'test_attention_black.mp4'
+    )
+    visualizer.plot_attention_snapshot(
+        model, black_frame, audio,
+        num_timesteps=8
+    )
+
+    print("\nDone! Check the output files.")

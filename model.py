@@ -65,7 +65,8 @@ class AudioVisualModel(nn.Module):
         
         audio_feats = audio_feats.unsqueeze(1).expand(-1, B, -1, -1)
         visual_feats = visual_feats.unsqueeze(0).expand(B, -1, -1, -1)
-        
+        #print("During compute_all_similarities")
+        #print(audio_feats.shape, visual_feats.shape)
         # Normalize features
         audio_feats = F.normalize(audio_feats, dim=-1)
         visual_feats = F.normalize(visual_feats, dim=-1)
@@ -102,7 +103,8 @@ class AudioVisualModel(nn.Module):
         reg_loss = self.compute_regularization_losses(clip_similarities, token_sims)
         
         total_loss = contrastive_loss + reg_loss
-        
+        #print("Regularization loss", reg_loss)
+        #print("Contrastive loss", contrastive_loss)
         return total_loss
     
     def compute_regularization_losses(self, clip_sims, token_sims):
@@ -173,15 +175,15 @@ if __name__ == "__main__":
     # Create dummy batch
     batch_size = 4
     frames = torch.randn(batch_size, 3, 224, 224)
-    specs = torch.randn(batch_size, 16331)
+    audio = torch.randn(batch_size, 16331)
     
     # Test training mode
-    loss = model(frames, specs)
+    loss = model(frames, audio)
     print(f"Training loss: {loss.item()}")
     
     # Test inference mode
     model.eval()
-    with torch.no_grad():
-        similarities = model(frames, specs)
-        print(f"Inference similarities shape: {similarities.shape}")  # Should be (batch_size)
-        print(f"Similarity values: {similarities}")
+    
+    similarities = model(frames, audio)
+    print(f"Inference similarities shape: {similarities.shape}")  # Should be (batch_size)
+    print(f"Similarity values: {similarities}")
