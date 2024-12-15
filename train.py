@@ -344,8 +344,8 @@ if __name__ == "__main__":
         output_dir='./outputs',
         batch_size=8,
         num_epochs=500,
-        learning_rate=1e-3,
-        use_wandb=False
+        learning_rate=1e-4,
+        use_wandb=True
     )
     trainer.train()
 
