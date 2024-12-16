@@ -107,7 +107,7 @@ class AudioVisualTrainer:
             pin_memory=True,
             collate_fn=collate_fn,
         )
-
+        num_training_steps = len(self.dataloader) * self.config['num_epochs']
         # Initialize model and optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -115,9 +115,18 @@ class AudioVisualTrainer:
         )
 
         # Learning rate scheduler - adjust for remaining epochs
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+           # self.optimizer,
+            #T_max=self.config['num_epochs'] - self.start_epoch
+        #)
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            T_max=self.config['num_epochs'] - self.start_epoch
+            max_lr=self.config['learning_rate'],
+            total_steps=num_training_steps,
+            pct_start=0.01,  # First 1% for warmup
+            div_factor=10,  # Initial lr = max_lr/10
+            final_div_factor=1e4,  # Final lr = max_lr/10000
+            anneal_strategy='cos'
         )
 
         # Initialize visualizer
@@ -134,6 +143,8 @@ class AudioVisualTrainer:
 
         # Save multiple random samples for visualization
         self.vis_samples = self._get_visualization_samples()
+
+        
 
     def find_latest_checkpoint(self):
         """Find the latest checkpoint in the output directory"""
@@ -299,6 +310,7 @@ class AudioVisualTrainer:
                 frames = batch['frame'].to(self.device)
                 audio = batch['audio'].to(self.device)
                 loss = self.model(frames, audio)
+                
 
                 if loss.item() > 10:  # Skip absurd losses
                     print(f"Skipping batch with loss: {loss.item():.4f}")
@@ -310,6 +322,15 @@ class AudioVisualTrainer:
                 accumulation_counter += 1
 
                 if accumulation_counter % self.gradient_accumulation_steps == 0:
+                    # Add gradient analysis here, before optimizer step
+                    if self.global_step % 100 == 0:  # Do it every 100 steps
+                        print("\nGradient Analysis:")
+                        for name, param in self.model.named_parameters():
+                            if param.grad is not None:
+                                grad_norm = param.grad.norm().item()
+                                param_norm = param.data.norm().item()
+                                print(f"{name[:30]:30} | grad_norm: {grad_norm:10.4f} | param_norm: {param_norm:10.4f}")
+                        print("\n")
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     
                     # Store initial parameters
@@ -328,7 +349,7 @@ class AudioVisualTrainer:
                     #            print(f"{name}: Updated (diff={diff:.6f})")
                     #        else:
                     #            print(f"{name}: No change")
-                    
+                    self.scheduler.step()
                     self.optimizer.zero_grad()
 
                 if self.use_wandb:
@@ -372,7 +393,7 @@ class AudioVisualTrainer:
                 self.best_loss = epoch_loss
                 self.save_checkpoint(epoch, self.global_step)
 
-            self.scheduler.step()
+            #self.scheduler.step()
 
             # Regular checkpoint every 5 epochs
             if epoch % 5 == 0:
@@ -385,8 +406,8 @@ if __name__ == "__main__":
         video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/densetok/densefuckfuckfuck/vggsound_split_1seconds',
         output_dir='./outputs',
         batch_size=48,
-        num_epochs=500,
-        learning_rate=8e-4,
+        num_epochs=100,
+        learning_rate=2e-3,
         use_wandb=True,
         num_vis_samples=10,
         gradient_accumulation_steps=1,  # Example accumulation step
