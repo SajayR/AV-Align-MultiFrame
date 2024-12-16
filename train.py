@@ -171,7 +171,7 @@ class AudioVisualTrainer:
         if use_wandb:
             wandb.init(
                 project="DenseGod",
-                name=f"run_{Path(output_dir).stem}",
+                name=f"DenseFuck",
                 config=self.config,
                 resume=True if not force_new_training and self.find_latest_checkpoint() else False
             )
@@ -545,13 +545,13 @@ if __name__ == "__main__":
         num_epochs=100,
         learning_rate=2e-3,
         use_wandb=True,
-        num_vis_samples=10,
+        num_vis_samples=20,
         gradient_accumulation_steps=1,  # Example accumulation step
-        vis_every=4000,
+        vis_every=5000,
         num_workers=16,
         force_new_training=False,
-        unfreeze_hubert_epoch=1,
-        unfreeze_vit_epoch=5
+        unfreeze_hubert_epoch=2,
+        unfreeze_vit_epoch=7
 
     )
     trainer.train()
