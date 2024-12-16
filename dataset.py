@@ -19,21 +19,24 @@ import av
 import random
 def extract_audio_from_video(video_path: Path) -> torch.Tensor:
     """Extract audio from video file and return as tensor."""
-    container = av.open(str(video_path))
-    audio = container.streams.audio[0]
-    resampler = av.audio.resampler.AudioResampler(format='s16', layout='mono', rate=16000)
-    
-    # Read all audio frames
-    samples = []
-    for frame in container.decode(audio):
-        frame.pts = None
-        frame = resampler.resample(frame)[0]
-        samples.append(frame.to_ndarray().reshape(-1))
-    
-    samples = torch.tensor(np.concatenate(samples))
-    #print("samples", samples.shape)
-    samples = samples.float() / 32768.0  # Convert to float and normalize
-    return samples
+    try:
+        container = av.open(str(video_path))
+        audio = container.streams.audio[0]
+        resampler = av.audio.resampler.AudioResampler(format='s16', layout='mono', rate=16000)
+        
+        # Read all audio frames
+        samples = []
+        for frame in container.decode(audio):
+            frame.pts = None
+            frame = resampler.resample(frame)[0]
+            samples.append(frame.to_ndarray().reshape(-1))
+        
+        samples = torch.tensor(np.concatenate(samples))
+        samples = samples.float() / 32768.0  # Convert to float and normalize
+        return samples
+    except:
+        print(f"Failed to load audio from {video_path}")
+        return torch.zeros(16000)  # Return 1 second of silence
 
 '''def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
     """Load video and preprocess frames for Cosmos encoder.
@@ -188,17 +191,27 @@ class AudioVisualDataset(Dataset):
         return len(self.video_files)
 
     def __getitem__(self, idx):
-        video_path = self.video_files[idx]
-        audio = extract_audio_from_video(video_path)
-        video_frames = load_and_preprocess_video(video_path, self.sample_fps)
-        #print("video_frames", video_frames.shape)
-        return {
-            'video_path': str(video_path),
-            'video_frames': video_frames, 
-            'audio': audio,
-            'vid_num': int(video_path.stem.split('_')[0]),
-            'segment_num': int(video_path.stem.split('_')[1]),
-        }
+        try:
+            video_path = self.video_files[idx]
+            audio = extract_audio_from_video(video_path)
+            video_frames = load_and_preprocess_video(video_path, self.sample_fps)
+            return {
+                'video_path': str(video_path),
+                'video_frames': video_frames, 
+                'audio': audio,
+                'vid_num': int(video_path.stem.split('_')[0]),
+                'segment_num': int(video_path.stem.split('_')[1]),
+            }
+        except Exception as e:
+            print(f"Error processing {self.video_files[idx]}: {str(e)}")
+            # Return a dummy sample with same structure
+            return {
+                'video_path': str(self.video_files[idx]),
+                'video_frames': torch.zeros(3, 224, 224),
+                'audio': torch.zeros(16331),
+                'vid_num': -1,  # sentinel value
+                'segment_num': -1
+            }
         
 
 def collate_fn(batch):

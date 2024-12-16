@@ -111,6 +111,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
+            prefetch_factor=8
         )
         num_training_steps = len(self.dataloader) * self.config['num_epochs']
 
@@ -174,7 +175,7 @@ class AudioVisualTrainer:
         # Initialize wandb
         if use_wandb:
             wandb.init(
-                project="audio-visual-learning",
+                project="DenseGod",
                 name=f"run_{Path(output_dir).stem}",
                 config=self.config,
                 resume=True if not force_new_training and self.find_latest_checkpoint() else False
@@ -317,14 +318,13 @@ class AudioVisualTrainer:
                     num_timesteps=5,
                     axes=axes[i] if self.num_vis_samples > 1 else axes
                 )
+                if self.use_wandb:
+                    wandb.log({
+                        "attention_snapshots": wandb.Image(plt),
+                        "epoch": epoch,
+                        "step": step
+                    })
                 torch.cuda.empty_cache()
-
-            if self.use_wandb:
-                wandb.log({
-                    "attention_snapshots": wandb.Image(plt),
-                    "epoch": epoch,
-                    "step": step
-                })
 
             plt.close('all')
 
@@ -345,12 +345,12 @@ class AudioVisualTrainer:
                         video_path=self.vis_samples['video_paths'][i]
                     )
 
-                    if self.use_wandb:
-                        wandb.log({
-                            f"attention_video_{i}": wandb.Video(str(video_path)),
-                            "epoch": epoch,
-                            "step": step
-                        })
+                    #if self.use_wandb:
+                      #  wandb.log({
+                       #     f"attention_video_{i}": wandb.Video(str(video_path)),
+#"epoch": epoch,
+                       #     "step": step
+                      #  })
 
                     torch.cuda.empty_cache()
                     gc.collect()
@@ -458,7 +458,7 @@ class AudioVisualTrainer:
 
                 if accumulation_counter % self.gradient_accumulation_steps == 0:
                     # Add gradient analysis here, before optimizer step
-                    if self.global_step % 100 == 0:  # Do it every 100 steps
+                    if self.global_step % 10000 == 0:  # Do it every epoch
                         print("\nGradient Analysis:")
                         for name, param in self.model.named_parameters():
                             if param.grad is not None:
@@ -491,7 +491,7 @@ class AudioVisualTrainer:
                     wandb.log({
                         "train_loss": loss.item() * self.gradient_accumulation_steps,  # log actual loss
                         "temperature": self.model.temperature.item(),
-                        "lr": self.scheduler.get_last_lr()[0]
+                        "learning_rate": self.scheduler.get_last_lr()[0]
                     })
 
                 loss_value = loss.item() * self.gradient_accumulation_steps
@@ -538,16 +538,16 @@ class AudioVisualTrainer:
 
 if __name__ == "__main__":
     trainer = AudioVisualTrainer(
-        video_dir='/home/cisco/heyo/densefuck/sound_of_pixels/densetok/densefuckfuckfuck/vggsound_split_1seconds',
+        video_dir='/home/cisco/nvmefudge/vggsound_1seconds',
         output_dir='./outputs',
         batch_size=48,
         num_epochs=100,
         learning_rate=2e-3,
-        use_wandb=False,
+        use_wandb=True,
         num_vis_samples=10,
         gradient_accumulation_steps=1,  # Example accumulation step
-        vis_every=1000,
-        num_workers=12,
+        vis_every=4000,
+        num_workers=16,
         force_new_training=False,
         unfreeze_hubert_epoch=1,
         unfreeze_vit_epoch=3
