@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import warnings
 warnings.filterwarnings("ignore")
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=1.0):
+    def __init__(self, temperature=3.0):
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
