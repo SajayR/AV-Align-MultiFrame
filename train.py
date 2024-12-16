@@ -87,11 +87,6 @@ class AudioVisualTrainer:
         self.global_step = 0
         self.best_loss = float('inf')
 
-        if not force_new_training:
-            checkpoint_path = self.find_latest_checkpoint()
-            if checkpoint_path:
-                print(f"Found checkpoint: {checkpoint_path}")
-                self.load_checkpoint(checkpoint_path)
 
         self.dataset = AudioVisualDataset(
             data_root=video_dir,
@@ -183,6 +178,12 @@ class AudioVisualTrainer:
 
         # Save multiple random samples for visualization
         self.vis_samples = self._get_visualization_samples()
+
+        if not force_new_training:
+            checkpoint_path = self.find_latest_checkpoint()
+            if checkpoint_path:
+                print(f"Found checkpoint: {checkpoint_path}")
+                self.load_checkpoint(checkpoint_path)
 
 
         
@@ -550,7 +551,7 @@ if __name__ == "__main__":
         num_workers=16,
         force_new_training=False,
         unfreeze_hubert_epoch=1,
-        unfreeze_vit_epoch=3
+        unfreeze_vit_epoch=5
 
     )
     trainer.train()
