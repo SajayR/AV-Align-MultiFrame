@@ -48,7 +48,9 @@ class AudioVisualTrainer:
         device: str = 'cuda',
         use_wandb: bool = False,
         force_new_training: bool = False,
-        gradient_accumulation_steps: int = 1  # New parameter for gradient accumulation
+        gradient_accumulation_steps: int = 1,
+        unfreeze_hubert_epoch: int = 10,   # New Hyperparam
+        unfreeze_vit_epoch: int = 20       # New Hyperparam
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +60,7 @@ class AudioVisualTrainer:
         self.num_vis_samples = num_vis_samples
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.model = AudioVisualModel().to(device)
+        
         # Store hyperparameters in config
         self.config = {
             'batch_size': batch_size,
@@ -68,6 +71,8 @@ class AudioVisualTrainer:
             'num_vis_samples': num_vis_samples,
             'gradient_accumulation_steps': gradient_accumulation_steps
         }
+        self.config['unfreeze_hubert_epoch'] = unfreeze_hubert_epoch
+        self.config['unfreeze_vit_epoch'] = unfreeze_vit_epoch
 
         # Setup logging
         logging.basicConfig(
@@ -108,10 +113,44 @@ class AudioVisualTrainer:
             collate_fn=collate_fn,
         )
         num_training_steps = len(self.dataloader) * self.config['num_epochs']
-        # Initialize model and optimizer
+
+        for name, param in self.model.visual_embedder.model.named_parameters():
+            param.requires_grad = False
+
+        # Freeze HuBERT parameters
+        for name, param in self.model.audio_embedder.hubert.named_parameters():
+            param.requires_grad = False
+            
+        
+        projection_params = []
+        temperature_params = []
+        hubert_params = []
+        vit_params = []
+
+        for name, param in self.model.named_parameters():
+            if "audio_embedder.hubert" in name:
+                # HuBERT backbone
+                hubert_params.append(param)
+            elif "visual_embedder.model" in name:
+                # ViT backbone
+                vit_params.append(param)
+            elif "projection" in name:
+                # Projection layers (audio or visual)
+                projection_params.append(param)
+            elif "temperature" in name:
+                # Temperature parameter
+                temperature_params.append(param)
+            else:
+                # If there are any other parameters not caught above
+                projection_params.append(param) 
+       
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config['learning_rate']
+            [
+                {'params': projection_params, 'lr': 1e-3},
+                {'params': temperature_params, 'lr': 1e-3},
+                {'params': hubert_params, 'lr': 1e-5},
+                {'params': vit_params, 'lr': 1e-5}
+            ]
         )
 
         # Learning rate scheduler - adjust for remaining epochs
@@ -144,6 +183,9 @@ class AudioVisualTrainer:
         # Save multiple random samples for visualization
         self.vis_samples = self._get_visualization_samples()
 
+
+        
+
         
 
     def find_latest_checkpoint(self):
@@ -167,10 +209,10 @@ class AudioVisualTrainer:
             'epoch': epoch,
             'step': step,
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),  # Includes parameter groups
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_loss': self.best_loss,
-            'config': self.config,
+            'config': self.config,  # Include all config parameters
             'vis_samples': {
                 'frames': self.vis_samples['frames'].cpu(),
                 'audios': self.vis_samples['audios'].cpu(),
@@ -184,12 +226,14 @@ class AudioVisualTrainer:
         temp_path.rename(checkpoint_path)
         
         self.logger.info(f'Saved checkpoint to {checkpoint_path}')
+        print(f"Saved checkpoint for epoch {epoch} and step {step}.")
+
     
 
     def load_checkpoint(self, checkpoint_path: str):
         """Load a checkpoint and handle hyperparameter changes"""
         print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         # Load model state
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -199,17 +243,42 @@ class AudioVisualTrainer:
         self.global_step = checkpoint['step']
         self.best_loss = checkpoint['best_loss']
         
-        # Load old config but don't override new settings yet
-        self.config = checkpoint.get('config', self.config)
+        # Reload config (merge with current config to keep new settings)
+        self.config.update(checkpoint.get('config', {}))
         
-        # Optimizer needs to be initialized before loading state
+        # Rebuild parameter groups to match the current model's trainable parameters
+        projection_params = []
+        temperature_params = []
+        hubert_params = []
+        vit_params = []
+
+        for name, param in self.model.named_parameters():
+            if "audio_embedder.hubert" in name:
+                hubert_params.append(param)
+            elif "visual_embedder.model" in name:
+                vit_params.append(param)
+            elif "projection" in name:
+                projection_params.append(param)
+            elif "temperature" in name:
+                temperature_params.append(param)
+            else:
+                projection_params.append(param)
+
+        # Initialize optimizer with the saved parameter groups
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config['learning_rate']
+            [
+                {'params': projection_params, 'lr': 1e-3},
+                {'params': temperature_params, 'lr': 1e-3},
+                {'params': hubert_params, 'lr': 1e-5},
+                {'params': vit_params, 'lr': 1e-5}
+            ]
         )
+
+        # Load optimizer and scheduler state
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        # Restore visualization samples if they exist
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # Restore visualization samples
         if 'vis_samples' in checkpoint:
             self.vis_samples = {
                 'frames': checkpoint['vis_samples']['frames'].to(self.device),
@@ -218,7 +287,8 @@ class AudioVisualTrainer:
             }
         
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
-        print(f"Best loss so far: {self.best_loss}")
+        print(f"Best loss so far: {self.best_loss:.4f}")
+
 
     def _get_visualization_samples(self):
         """Get multiple random samples for visualization"""
@@ -290,17 +360,82 @@ class AudioVisualTrainer:
             torch.cuda.empty_cache()
 
     def train(self, num_epochs: int = None):
-        """Train with support for extending training"""
         if num_epochs is not None:
             self.config['num_epochs'] = num_epochs
-            # Adjust scheduler for new total epochs
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
                 T_max=self.config['num_epochs'] - self.start_epoch
             )
-        
+
         accumulation_counter = 0
         for epoch in range(self.start_epoch, self.config['num_epochs']):
+
+            if epoch == self.config['unfreeze_hubert_epoch']:
+                print(f"Unfreezing HuBERT parameters at epoch {epoch}")
+                for param in self.model.audio_embedder.hubert.parameters():
+                    param.requires_grad = True
+
+                # Re-build parameter groups after unfreezing
+                projection_params = []
+                temperature_params = []
+                hubert_params = []
+                vit_params = []
+
+                for name, param in self.model.named_parameters():
+                    if "audio_embedder.hubert" in name:
+                        hubert_params.append(param)
+                    elif "visual_embedder.model" in name:
+                        vit_params.append(param)
+                    elif "projection" in name:
+                        projection_params.append(param)
+                    elif "temperature" in name:
+                        temperature_params.append(param)
+                    else:
+                        projection_params.append(param)
+
+                self.optimizer = torch.optim.AdamW(
+                    [
+                        {'params': projection_params, 'lr': 1e-3},
+                        {'params': temperature_params, 'lr': 1e-3},
+                        {'params': hubert_params, 'lr': 1e-5},
+                        {'params': vit_params, 'lr': 1e-5}
+                    ]
+                )
+                # If using OneCycleLR or any scheduler that depends on total steps/epochs,
+                # you may re-initialize or continue the scheduler as you prefer.
+
+            if epoch == self.config['unfreeze_vit_epoch']:
+                print(f"Unfreezing ViT parameters at epoch {epoch}")
+                for param in self.model.visual_embedder.model.parameters():
+                    param.requires_grad = True
+
+                # Re-build parameter groups now that ViT is unfrozen
+                projection_params = []
+                temperature_params = []
+                hubert_params = []
+                vit_params = []
+
+                for name, param in self.model.named_parameters():
+                    if "audio_embedder.hubert" in name:
+                        hubert_params.append(param)
+                    elif "visual_embedder.model" in name:
+                        vit_params.append(param)
+                    elif "projection" in name:
+                        projection_params.append(param)
+                    elif "temperature" in name:
+                        temperature_params.append(param)
+                    else:
+                        projection_params.append(param)
+
+                self.optimizer = torch.optim.AdamW(
+                    [
+                        {'params': projection_params, 'lr': 1e-3},
+                        {'params': temperature_params, 'lr': 1e-3},
+                        {'params': hubert_params, 'lr': 1e-5},
+                        {'params': vit_params, 'lr': 1e-5}
+                    ]
+                )
+
             self.model.train()
             epoch_losses = []
 
@@ -408,12 +543,14 @@ if __name__ == "__main__":
         batch_size=48,
         num_epochs=100,
         learning_rate=2e-3,
-        use_wandb=True,
+        use_wandb=False,
         num_vis_samples=10,
         gradient_accumulation_steps=1,  # Example accumulation step
         vis_every=1000,
         num_workers=12,
         force_new_training=False,
+        unfreeze_hubert_epoch=1,
+        unfreeze_vit_epoch=3
 
     )
     trainer.train()
