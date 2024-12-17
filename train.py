@@ -50,7 +50,8 @@ class AudioVisualTrainer:
         force_new_training: bool = False,
         gradient_accumulation_steps: int = 1,
         unfreeze_hubert_epoch: int = 10,   # New Hyperparam
-        unfreeze_vit_epoch: int = 20       # New Hyperparam
+        unfreeze_vit_epoch: int = 20,       # New Hyperparam
+        save_every_steps: int = 3000
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,7 @@ class AudioVisualTrainer:
         self.num_vis_samples = num_vis_samples
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.model = AudioVisualModel().to(device)
+        self.save_every_steps = save_every_steps
         
         # Store hyperparameters in config
         self.config = {
@@ -169,12 +171,14 @@ class AudioVisualTrainer:
 
         # Initialize wandb
         if use_wandb:
-            wandb.init(
-                project="DenseGod",
-                name=f"DenseFuck",
-                config=self.config,
-                resume=True if not force_new_training and self.find_latest_checkpoint() else False
-            )
+            if not force_new_training and self.find_latest_checkpoint():
+                pass
+            else:
+                wandb.init(
+                    project="DenseGod",
+                    name=f"DenseFuck",
+                    config=self.config
+                )
 
         # Save multiple random samples for visualization
         self.vis_samples = self._get_visualization_samples()
@@ -184,6 +188,14 @@ class AudioVisualTrainer:
             if checkpoint_path:
                 print(f"Found checkpoint: {checkpoint_path}")
                 self.load_checkpoint(checkpoint_path)
+
+        '''if use_wandb:
+            if wandb.run is None:  # Only initialize if no run exists
+                wandb.init(
+                    project="DenseGod",
+                    name=f"run_{Path(output_dir).stem}",
+                    config=self.config
+                )'''
 
 
         
@@ -221,7 +233,8 @@ class AudioVisualTrainer:
                 'video_paths': self.vis_samples['video_paths']
             }
         }
-        
+        if self.use_wandb and wandb.run is not None:
+            checkpoint['wandb_run_id'] = wandb.run.id
         # Save with temp file to prevent corruption
         temp_path = checkpoint_path.with_suffix('.temp.pt')
         torch.save(checkpoint, temp_path)
@@ -287,6 +300,24 @@ class AudioVisualTrainer:
                 'audios': checkpoint['vis_samples']['audios'].to(self.device),
                 'video_paths': checkpoint['vis_samples']['video_paths']
             }
+            
+        if self.use_wandb:
+                wandb_run_id = checkpoint.get('wandb_run_id')
+                #print("Found wandb run id", wandb_run_id)
+                if wandb_run_id is not None:
+                    # Initialize wandb with the same run ID
+                    wandb.init(
+                        project="DenseGod",
+                        id=wandb_run_id,
+                        resume="must"
+                        )
+                else:
+                    print("No wandb run id found")
+                    wandb.init(
+                        project="DenseGod",
+                        name=f"DenseFuck",
+                        config=self.config
+                    )
         
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
         print(f"Best loss so far: {self.best_loss:.4f}")
@@ -370,7 +401,9 @@ class AudioVisualTrainer:
 
         accumulation_counter = 0
         for epoch in range(self.start_epoch, self.config['num_epochs']):
-
+            print(f"Epoch {epoch}")
+            print("Unfreezing HuBERT at epoch", self.config['unfreeze_hubert_epoch'])
+            print("Unfreezing ViT at epoch", self.config['unfreeze_vit_epoch'])
             if epoch == self.config['unfreeze_hubert_epoch']:
                 print(f"Unfreezing HuBERT parameters at epoch {epoch}")
                 for param in self.model.audio_embedder.hubert.parameters():
@@ -439,6 +472,10 @@ class AudioVisualTrainer:
 
             self.model.train()
             epoch_losses = []
+            print("Training the following layers:")
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    print(f"  {name}")
 
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for batch in pbar:
@@ -468,23 +505,7 @@ class AudioVisualTrainer:
                                 print(f"{name[:30]:30} | grad_norm: {grad_norm:10.4f} | param_norm: {param_norm:10.4f}")
                         print("\n")
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                    
-                    # Store initial parameters
-                    #initial_params = {}
-                    #for name, param in self.model.named_parameters():
-                    #    initial_params[name] = param.data.clone()
-                    
                     self.optimizer.step()
-                    
-                    # Check which layers were updated
-                    #print("\nChecking layer updates:")
-                    #for name, param in self.model.named_parameters():
-                    #    if param.grad is not None:
-                    #        diff = torch.sum(torch.abs(param.data - initial_params[name])).item()
-                    #        if diff > 0:
-                    #            print(f"{name}: Updated (diff={diff:.6f})")
-                    #        else:
-                    #            print(f"{name}: No change")
                     self.scheduler.step()
                     self.optimizer.zero_grad()
 
@@ -510,6 +531,8 @@ class AudioVisualTrainer:
                         self.create_visualization(epoch, self.global_step)
                     plt.close('all')
                     gc.collect()
+                if self.global_step % self.save_every_steps == 0:
+                    self.save_checkpoint(epoch, self.global_step)
 
                 self.global_step += 1
 
@@ -525,14 +548,14 @@ class AudioVisualTrainer:
                 })
 
             # Save best checkpoint
-            if epoch_loss < self.best_loss:
-                self.best_loss = epoch_loss
-                self.save_checkpoint(epoch, self.global_step)
+            #if epoch_loss < self.best_loss:
+                #self.best_loss = epoch_loss
+                #self.save_checkpoint(epoch, self.global_step)
 
             #self.scheduler.step()
 
             # Regular checkpoint every 5 epochs
-            if epoch % 5 == 0:
+            if epoch % 1 == 0:
                 self.save_checkpoint(epoch, self.global_step)
 
         print("Training completed!")
@@ -548,10 +571,11 @@ if __name__ == "__main__":
         num_vis_samples=20,
         gradient_accumulation_steps=1,  # Example accumulation step
         vis_every=5000,
-        num_workers=16,
+        num_workers=15,
         force_new_training=False,
-        unfreeze_hubert_epoch=2,
-        unfreeze_vit_epoch=7
+        unfreeze_hubert_epoch=1,
+        unfreeze_vit_epoch=5,
+        save_every_steps=3000
 
     )
     trainer.train()
