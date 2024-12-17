@@ -258,7 +258,7 @@ class AudioVisualTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.start_epoch = checkpoint['epoch'] + 1
+        self.start_epoch = checkpoint['epoch']
         self.global_step = checkpoint['step']
         self.best_loss = checkpoint['best_loss']
         self.config.update(checkpoint.get('config', {}))
