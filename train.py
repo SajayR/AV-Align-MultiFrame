@@ -72,7 +72,8 @@ class AudioVisualTrainer:
             'num_vis_samples': num_vis_samples,
             'gradient_accumulation_steps': gradient_accumulation_steps,
             'unfreeze_hubert_epoch': unfreeze_hubert_epoch,
-            'unfreeze_vit_epoch': unfreeze_vit_epoch
+            'unfreeze_vit_epoch': unfreeze_vit_epoch,
+            'save_every_steps': save_every_steps
         }
 
         logging.basicConfig(
@@ -106,15 +107,13 @@ class AudioVisualTrainer:
             prefetch_factor=8
         )
         
-        num_training_steps = len(self.dataloader) * self.config['num_epochs']
-
         # Initially freeze Vision and HuBERT parameters
         for param in self.model.visual_embedder.model.parameters():
             param.requires_grad = False
         for param in self.model.audio_embedder.hubert.parameters():
             param.requires_grad = False
 
-        # Identify parameter groups once and for all
+        # Separate parameter groups
         projection_params = []
         temperature_params = []
         hubert_params = []
@@ -132,27 +131,42 @@ class AudioVisualTrainer:
             else:
                 projection_params.append(param)
 
-        # We include all parameters from the start.
-        # Huberts and VIT params are initially requires_grad=False, so no updates occur.
-        self.optimizer = torch.optim.AdamW(
+        # Create separate optimizers
+        # Projection + temperature optimizer
+        self.optimizer_projection = torch.optim.AdamW(
             [
                 {'params': projection_params, 'lr': 1e-3},
                 {'params': temperature_params, 'lr': 1e-3},
-                {'params': hubert_params, 'lr': 1e-5},
-                {'params': vit_params, 'lr': 1e-5}
             ]
         )
-        
-        # Using OneCycleLR or another scheduler that depends on total steps is fine.
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            self.optimizer,
+
+        # HuBERT optimizer (initially frozen, will unfreeze later)
+        self.optimizer_hubert = torch.optim.AdamW(
+            [{'params': hubert_params, 'lr': 1e-5}]
+        )
+
+        # ViT optimizer (initially frozen, will unfreeze later)
+        self.optimizer_vit = torch.optim.AdamW(
+            [{'params': vit_params, 'lr': 1e-5}]
+        )
+
+        # Total training steps
+        num_training_steps = len(self.dataloader) * self.config['num_epochs']
+
+        # For the projection/temperature parameters (always trainable), we can define a scheduler from the start
+        self.scheduler_projection = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer_projection,
             max_lr=self.config['learning_rate'],
             total_steps=num_training_steps,
-            pct_start=0.01,
+            pct_start=0.015,
             div_factor=10,
             final_div_factor=1e4,
             anneal_strategy='cos'
         )
+
+        # We'll define the hubert and vit schedulers at the time we unfreeze them
+        self.scheduler_hubert = None
+        self.scheduler_vit = None
 
         self.visualizer = AudioVisualizer()
 
@@ -162,7 +176,7 @@ class AudioVisualTrainer:
             else:
                 wandb.init(
                     project="DenseGod",
-                    name="DenseFuck",
+                    name="DenseFudge",
                     config=self.config
                 )
 
@@ -174,11 +188,11 @@ class AudioVisualTrainer:
                 print(f"Found checkpoint: {checkpoint_path}")
                 self.load_checkpoint(checkpoint_path)
 
-        if wandb.run is None:
+        if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
                 project="DenseGod",
-                name="DenseFuck",
+                name="DenseFudge",
                 config=self.config
             )
 
@@ -186,10 +200,15 @@ class AudioVisualTrainer:
         checkpoints = list(self.output_dir.glob('checkpoint_epoch*.pt'))
         if not checkpoints:
             return None
-        latest = max(checkpoints, key=lambda x: (
-            int(str(x).split('epoch')[1].split('_')[0]),
-            int(str(x).split('step')[1].split('.')[0])
-        ))
+        # Sort by epoch and step
+        def parse_ckpt(ck):
+            name = ck.name
+            # expect format checkpoint_epoch{epoch}_step{step}.pt
+            # fallback if not correct format
+            epoch_str = name.split('epoch')[1].split('_')[0]
+            step_str = name.split('step')[1].split('.')[0]
+            return (int(epoch_str), int(step_str))
+        latest = max(checkpoints, key=lambda x: parse_ckpt(x))
         return latest
 
     def save_checkpoint(self, epoch: int, step: int):
@@ -199,8 +218,10 @@ class AudioVisualTrainer:
             'epoch': epoch,
             'step': step,
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+            'optimizer_projection_state_dict': self.optimizer_projection.state_dict(),
+            'scheduler_projection_state_dict': self.scheduler_projection.state_dict() if self.scheduler_projection is not None else None,
+            'optimizer_hubert_state_dict': self.optimizer_hubert.state_dict(),
+            'optimizer_vit_state_dict': self.optimizer_vit.state_dict(),
             'best_loss': self.best_loss,
             'config': self.config,
             'vis_samples': {
@@ -209,8 +230,22 @@ class AudioVisualTrainer:
                 'video_paths': self.vis_samples['video_paths']
             }
         }
+
+        # If hubert scheduler is available
+        if self.scheduler_hubert is not None:
+            checkpoint['scheduler_hubert_state_dict'] = self.scheduler_hubert.state_dict()
+        else:
+            checkpoint['scheduler_hubert_state_dict'] = None
+
+        # If vit scheduler is available
+        if self.scheduler_vit is not None:
+            checkpoint['scheduler_vit_state_dict'] = self.scheduler_vit.state_dict()
+        else:
+            checkpoint['scheduler_vit_state_dict'] = None
+
         if self.use_wandb and wandb.run is not None:
             checkpoint['wandb_run_id'] = wandb.run.id
+
         temp_path = checkpoint_path.with_suffix('.temp.pt')
         torch.save(checkpoint, temp_path)
         temp_path.rename(checkpoint_path)
@@ -223,14 +258,17 @@ class AudioVisualTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        '''self.start_epoch = checkpoint['epoch'] + 1
+        self.start_epoch = checkpoint['epoch'] + 1
         self.global_step = checkpoint['step']
         self.best_loss = checkpoint['best_loss']
         self.config.update(checkpoint.get('config', {}))
 
-        # No need to rebuild parameter groups since we have them from the start
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])'''
+        self.optimizer_projection.load_state_dict(checkpoint['optimizer_projection_state_dict'])
+        if checkpoint.get('scheduler_projection_state_dict') is not None:
+            self.scheduler_projection.load_state_dict(checkpoint['scheduler_projection_state_dict'])
+
+        self.optimizer_hubert.load_state_dict(checkpoint['optimizer_hubert_state_dict'])
+        self.optimizer_vit.load_state_dict(checkpoint['optimizer_vit_state_dict'])
 
         if 'vis_samples' in checkpoint:
             self.vis_samples = {
@@ -239,7 +277,7 @@ class AudioVisualTrainer:
                 'video_paths': checkpoint['vis_samples']['video_paths']
             }
         
-        '''if self.use_wandb:
+        if self.use_wandb:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
@@ -250,12 +288,48 @@ class AudioVisualTrainer:
             else:
                 wandb.init(
                     project="DenseGod",
-                    name=f"DenseFuck",
+                    name=f"DenseFudge",
                     config=self.config
                 )
 
+        # If we are loading after unfreeze epochs, we should restore schedulers if available
+        current_epoch = self.start_epoch
+        num_training_steps = len(self.dataloader) * self.config['num_epochs']
+
+        # If we have passed the unfreeze hubert epoch
+        if current_epoch > self.config['unfreeze_hubert_epoch']:
+            steps_remaining_hubert = (self.config['num_epochs'] - self.config['unfreeze_hubert_epoch']) * len(self.dataloader)
+            if self.scheduler_hubert is None:
+                self.scheduler_hubert = torch.optim.lr_scheduler.OneCycleLR(
+                    self.optimizer_hubert,
+                    max_lr=1e-5,
+                    total_steps=steps_remaining_hubert,
+                    pct_start=0.1,
+                    div_factor=10,
+                    final_div_factor=1e4,
+                    anneal_strategy='cos'
+                )
+            if 'scheduler_hubert_state_dict' in checkpoint and checkpoint['scheduler_hubert_state_dict'] is not None:
+                self.scheduler_hubert.load_state_dict(checkpoint['scheduler_hubert_state_dict'])
+
+        # If we have passed the unfreeze vit epoch
+        if current_epoch > self.config['unfreeze_vit_epoch']:
+            steps_remaining_vit = (self.config['num_epochs'] - self.config['unfreeze_vit_epoch']) * len(self.dataloader)
+            if self.scheduler_vit is None:
+                self.scheduler_vit = torch.optim.lr_scheduler.OneCycleLR(
+                    self.optimizer_vit,
+                    max_lr=1e-5,
+                    total_steps=steps_remaining_vit,
+                    pct_start=0.1,
+                    div_factor=10,
+                    final_div_factor=1e4,
+                    anneal_strategy='cos'
+                )
+            if 'scheduler_vit_state_dict' in checkpoint and checkpoint['scheduler_vit_state_dict'] is not None:
+                self.scheduler_vit.load_state_dict(checkpoint['scheduler_vit_state_dict'])
+
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
-        print(f"Best loss so far: {self.best_loss:.4f}")'''
+        print(f"Best loss so far: {self.best_loss:.4f}")
 
     def _get_visualization_samples(self):
         batch = next(iter(self.dataloader))
@@ -310,28 +384,50 @@ class AudioVisualTrainer:
     def train(self, num_epochs: int = None):
         if num_epochs is not None:
             self.config['num_epochs'] = num_epochs
-            # If desired, a different scheduler could be reinitialized here.
-            # But ideally, stick with the initial one.
 
         accumulation_counter = 0
-        for epoch in range(self.start_epoch, self.config['num_epochs']):
+        total_epochs = self.config['num_epochs']
+        dataloader_len = len(self.dataloader)
+
+        for epoch in range(self.start_epoch, total_epochs):
             print(f"Epoch {epoch}")
-            #print("Unfreezing HuBERT at epoch", self.config['unfreeze_hubert_epoch'])
-            #print("Unfreezing ViT at epoch", self.config['unfreeze_vit_epoch'])
-            
-            # Unfreeze logic: Just set requires_grad = True without re-init optimizer
+
+            # Unfreeze logic
             if epoch == self.config['unfreeze_hubert_epoch']:
                 print(f"Unfreezing HuBERT parameters at epoch {epoch}")
                 for param in self.model.audio_embedder.hubert.parameters():
                     param.requires_grad = True
+                # Initialize hubert scheduler now that it is unfrozen
+                steps_remaining_hubert = (self.config['num_epochs'] - epoch) * dataloader_len
+                self.scheduler_hubert = torch.optim.lr_scheduler.OneCycleLR(
+                    self.optimizer_hubert,
+                    max_lr=1e-5,
+                    total_steps=steps_remaining_hubert,
+                    pct_start=0.1,
+                    div_factor=10,
+                    final_div_factor=1e4,
+                    anneal_strategy='cos'
+                )
 
             if epoch == self.config['unfreeze_vit_epoch']:
                 print(f"Unfreezing ViT parameters at epoch {epoch}")
                 for param in self.model.visual_embedder.model.parameters():
                     param.requires_grad = True
+                # Initialize vit scheduler now that it is unfrozen
+                steps_remaining_vit = (self.config['num_epochs'] - epoch) * dataloader_len
+                self.scheduler_vit = torch.optim.lr_scheduler.OneCycleLR(
+                    self.optimizer_vit,
+                    max_lr=1e-5,
+                    total_steps=steps_remaining_vit,
+                    pct_start=0.1,
+                    div_factor=10,
+                    final_div_factor=1e4,
+                    anneal_strategy='cos'
+                )
 
             self.model.train()
             epoch_losses = []
+
             print("Training the following layers:")
             for name, param in self.model.named_parameters():
                 if param.requires_grad:
@@ -353,31 +449,50 @@ class AudioVisualTrainer:
                 
                 accumulation_counter += 1
 
+                # Step optimizers and schedulers after accumulation steps
                 if accumulation_counter % self.gradient_accumulation_steps == 0:
-                    if self.global_step % 10000 == 0:
-                        print("\nGradient Analysis:")
-                        for name, param in self.model.named_parameters():
-                            if param.grad is not None:
-                                grad_norm = param.grad.norm().item()
-                                param_norm = param.data.norm().item()
-                                print(f"{name[:30]:30} | grad_norm: {grad_norm:10.4f} | param_norm: {param_norm:10.4f}")
-                        print("\n")
-
+                    # Gradient clipping
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
 
-                if self.use_wandb:
-                    wandb.log({
-                        "train_loss": loss.item() * self.gradient_accumulation_steps,
-                        "temperature": self.model.temperature.item(),
-                        "learning_rate": self.scheduler.get_last_lr()[0]
-                    })
+                    # Always step projection optimizer and scheduler
+                    self.optimizer_projection.step()
+                    self.scheduler_projection.step()
+                    self.optimizer_projection.zero_grad()
+
+                    # Step hubert optimizer & scheduler only if unfrozen
+                    if epoch >= self.config['unfreeze_hubert_epoch']:
+                        self.optimizer_hubert.step()
+                        self.scheduler_hubert.step()
+                        self.optimizer_hubert.zero_grad()
+
+                    # Step vit optimizer & scheduler only if unfrozen
+                    if epoch >= self.config['unfreeze_vit_epoch']:
+                        self.optimizer_vit.step()
+                        self.scheduler_vit.step()
+                        self.optimizer_vit.zero_grad()
 
                 loss_value = loss.item() * self.gradient_accumulation_steps
                 epoch_losses.append(loss_value)
                 pbar.set_postfix({'loss': f'{loss_value:.4f}'})
+
+                if self.use_wandb:
+                    log_dict = {
+                        "train_loss": loss_value,
+                        "projection_lr": self.optimizer_projection.param_groups[0]['lr'],
+                        "temperature": self.model.temperature.item()
+                    }
+                    if epoch >= self.config['unfreeze_hubert_epoch']:
+                        log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
+                    else:
+                        log_dict["hubert_lr"] = 0
+                    if epoch >= self.config['unfreeze_vit_epoch']:
+                        log_dict["vit_lr"] = self.optimizer_vit.param_groups[0]['lr']
+                    else:
+                        log_dict["vit_lr"] = 0
+                    
+                    log_dict["epoch"] = epoch
+                    log_dict["step"] = self.global_step
+                    wandb.log(log_dict)
 
                 del frames, audio, loss
                 torch.cuda.empty_cache()
@@ -390,6 +505,7 @@ class AudioVisualTrainer:
                         self.create_visualization(epoch, self.global_step)
                     plt.close('all')
                     gc.collect()
+
                 if self.global_step % self.save_every_steps == 0:
                     self.save_checkpoint(epoch, self.global_step)
 
@@ -402,12 +518,14 @@ class AudioVisualTrainer:
                 wandb.log({
                     'epoch_loss': epoch_loss,
                     'epoch': epoch,
-                    'learning_rate': self.scheduler.get_last_lr()[0]
+                    # Just log one of the schedulers' LR if you want
+                    'projection_lr': self.optimizer_projection.param_groups[0]['lr'],
+                    #'hubert_lr': self.optimizer_hubert.param_groups[0]['lr'],
+                    #'vit_lr': self.optimizer_vit.param_groups[0]['lr']
                 })
 
-            # Regular checkpoint every epoch (or every few epochs if desired)
-            if epoch % 1 == 0:
-                self.save_checkpoint(epoch, self.global_step)
+            # Save checkpoint every epoch
+            self.save_checkpoint(epoch, self.global_step)
 
         print("Training completed!")
 
@@ -424,8 +542,8 @@ if __name__ == "__main__":
         vis_every=5000,
         num_workers=15,
         force_new_training=False,
-        unfreeze_hubert_epoch=0,
-        unfreeze_vit_epoch=5,
+        unfreeze_hubert_epoch=2,
+        unfreeze_vit_epoch=6,
         save_every_steps=3000
     )
     trainer.train()
