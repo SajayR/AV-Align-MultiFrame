@@ -104,7 +104,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=6
+            prefetch_factor=8
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -496,7 +496,7 @@ class AudioVisualTrainer:
                 del frames, audio, loss
                 torch.cuda.empty_cache()
 
-                if self.global_step % 1000 == 0:
+                if self.global_step % 500 == 0:
                     gc.collect()
 
                 if self.global_step % self.vis_every == 0:

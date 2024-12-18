@@ -13,10 +13,10 @@ import multiprocessing
 #import dataloader
 from torch.utils.data import DataLoader
 # Attempt to use fork for potentially faster dataloader start
-try:
-    multiprocessing.set_start_method('fork', force=True)
-except:
-    multiprocessing.set_start_method('spawn', force=True)
+#try:
+    #multiprocessing.set_start_method('fork', force=True)
+#except:
+multiprocessing.set_start_method('spawn', force=True)
 import gc
 # Global normalization constants (ImageNet)
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
@@ -74,6 +74,7 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
         decoded_frame = frame.to_rgb().to_ndarray()
         break
     container.close()
+    #video_stream.codec_context.close()
 
     # Convert to tensor, resize, and normalize
     frame_tensor = torch.from_numpy(decoded_frame).permute(2, 0, 1).float() / 255.0
@@ -132,6 +133,7 @@ class AudioVisualDataset(Dataset):
         return len(self.video_files)
 
     def __getitem__(self, idx):
+    
         video_path = self.video_files[idx]
         try:
             audio = extract_audio_from_video(video_path)
@@ -170,6 +172,105 @@ def collate_fn(batch):
     }
 
 if __name__ == "__main__":
+
+    from torch.utils.data import DataLoader
+    from tqdm import tqdm
+    dataset = AudioVisualDataset(
+        data_root="/home/cisco/nvmefudge/vggsound_1seconds",
+        sample_fps=20
+    )
+
+    batch_sampler = VideoBatchSampler(
+        vid_nums=dataset.vid_nums,
+        batch_size=48
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=16,
+        persistent_workers=True,
+        pin_memory=True,
+        collate_fn=collate_fn,
+        prefetch_factor=6
+    )
+    i=0
+    while True:  # Just keep going like in training
+        pbar = tqdm(dataloader, desc=f'Epoch {i}')  
+        for batch in pbar:
+            pass  # Just iterate through, simulating data being sent to training
+        i+=1
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    '''
     import unittest
     
     class DatasetTests(unittest.TestCase):
@@ -282,3 +383,4 @@ if __name__ == "__main__":
 
     if __name__ == "__main__":
         unittest.main(argv=['first-arg-is-ignored'], exit=False)
+        '''
