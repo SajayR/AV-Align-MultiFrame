@@ -139,10 +139,10 @@ class AudioVisualTrainer:
             ]
         )
         self.optimizer_hubert = torch.optim.AdamW(
-            [{'params': hubert_params, 'lr': 6e-5}]
+            [{'params': hubert_params, 'lr': 8e-5}]
         )
         self.optimizer_vit = torch.optim.AdamW(
-            [{'params': vit_params, 'lr': 6e-5}]
+            [{'params': vit_params, 'lr': 8e-5}]
         )
 
         # Total training steps
@@ -174,8 +174,7 @@ class AudioVisualTrainer:
                 )
 
         self.vis_samples = self._get_visualization_samples()
-        #print("Compiling model in init")
-        #self.needs_initial_compile = True
+
         if not force_new_training:
             checkpoint_path = self.find_latest_checkpoint()
             if checkpoint_path:
@@ -249,7 +248,6 @@ class AudioVisualTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        #update temp parameter manually if needed
 
         self.start_epoch = checkpoint['epoch']
         self.global_step = checkpoint['step']
@@ -291,7 +289,6 @@ class AudioVisualTrainer:
 
         # Re-initialize schedulers if needed
         if (checkpoint.get('scheduler_hubert_state_dict') is not None) and (checkpoint['scheduler_hubert_state_dict'] is not None):
-            # If we had passed the unfreeze epoch and had a scheduler saved
             self.scheduler_hubert = torch.optim.lr_scheduler.OneCycleLR(
                 self.optimizer_hubert,
                 max_lr=6e-5,
@@ -319,7 +316,6 @@ class AudioVisualTrainer:
         self._set_freeze_state(self.start_epoch)
 
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
-        #print(f"Best loss so far: {self.best_loss:.4f}")
 
     def _get_visualization_samples(self):
         batch = next(iter(self.dataloader))
@@ -372,20 +368,11 @@ class AudioVisualTrainer:
             torch.cuda.empty_cache()
 
     def _set_freeze_state(self, current_epoch: int):
-        """
-        Ensure that parameters and schedulers are correctly (un)frozen based on the current epoch.
-        This should be called:
-          - After loading a checkpoint
-          - At the start of each epoch in training
-        """
-
         dataloader_len = len(self.dataloader)
-        #need_recompile = self.needs_initial_compile 
-        # If we are past the HuBERT unfreeze epoch
+        
         if current_epoch >= self.config['unfreeze_hubert_epoch']:
             for param in self.model.audio_embedder.hubert.parameters():
                 param.requires_grad = True
-            # Initialize hubert scheduler if not set and not loaded from checkpoint
             if self.scheduler_hubert is None:
                 steps_remaining_hubert = (self.config['num_epochs'] - current_epoch) * dataloader_len
                 self.scheduler_hubert = torch.optim.lr_scheduler.OneCycleLR(
@@ -397,13 +384,10 @@ class AudioVisualTrainer:
                     final_div_factor=1e4,
                     anneal_strategy='cos'
                 )
-        #    need_recompile = True
 
-        # If we are past the ViT unfreeze epoch
         if current_epoch >= self.config['unfreeze_vit_epoch']:
             for param in self.model.visual_embedder.model.parameters():
                 param.requires_grad = True
-            # Initialize vit scheduler if not set and not loaded from checkpoint
             if self.scheduler_vit is None:
                 steps_remaining_vit = (self.config['num_epochs'] - current_epoch) * dataloader_len
                 self.scheduler_vit = torch.optim.lr_scheduler.OneCycleLR(
@@ -415,13 +399,6 @@ class AudioVisualTrainer:
                     final_div_factor=1e4,
                     anneal_strategy='cos'
                 )
-         #   need_recompile = True
-
-        #if need_recompile:
-        #    print("Compiling model..." + 
-        #          " (Initial compile)" if self.needs_initial_compile else " (Recompile after unfreezing)")
-        #    self.model = torch.compile(self.model, mode='max-autotune')
-        #    self.needs_initial_compile = False
 
     def train(self, num_epochs: int = None):
         if num_epochs is not None:
@@ -445,7 +422,22 @@ class AudioVisualTrainer:
                 if param.requires_grad:
                     print(f"  {name}")
 
+            # Determine if we need to skip batches due to checkpoint resume
+            #steps_done_in_current_epoch = self.global_step - (epoch * dataloader_len)
+            #if steps_done_in_current_epoch < 0:
+            #    steps_done_in_current_epoch = 0
+
+            #if steps_done_in_current_epoch > 0 and steps_done_in_current_epoch < dataloader_len:
+            #    print("Initializing dataloader iterator")
+            #    dataloader_iter = iter(self.dataloader)
+            #    print(f"Skipping {steps_done_in_current_epoch} steps")
+            #    for _ in tqdm(range(steps_done_in_current_epoch), desc="Skipping steps"):
+            #        next(dataloader_iter)
+            #    pbar = tqdm(dataloader_iter, desc=f'Epoch {epoch}', initial=steps_done_in_current_epoch, total=dataloader_len)
+            #else:
+            #    pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
+
             for batch in pbar:
                 self.model.train()
                 frames = batch['frame'].to(self.device)
@@ -461,23 +453,18 @@ class AudioVisualTrainer:
                 
                 accumulation_counter += 1
 
-                # Step optimizers and schedulers after accumulation steps
                 if accumulation_counter % self.gradient_accumulation_steps == 0:
-                    # Gradient clipping
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
 
-                    # Always step projection optimizer and scheduler
                     self.optimizer_projection.step()
                     self.scheduler_projection.step()
                     self.optimizer_projection.zero_grad()
 
-                    # Step hubert optimizer & scheduler only if unfrozen
                     if epoch >= self.config['unfreeze_hubert_epoch']:
                         self.optimizer_hubert.step()
                         self.scheduler_hubert.step()
                         self.optimizer_hubert.zero_grad()
 
-                    # Step vit optimizer & scheduler only if unfrozen
                     if epoch >= self.config['unfreeze_vit_epoch']:
                         self.optimizer_vit.step()
                         self.scheduler_vit.step()
@@ -509,7 +496,7 @@ class AudioVisualTrainer:
                 del frames, audio, loss
                 torch.cuda.empty_cache()
 
-                if self.global_step % 100 == 0:
+                if self.global_step % 1000 == 0:
                     gc.collect()
 
                 if self.global_step % self.vis_every == 0:
