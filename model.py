@@ -175,7 +175,7 @@ class AudioVisualModel(nn.Module):
         
         # Combine with reduced weights
         reg_loss = (0.01 * l_nonneg + 
-                    0.2 * l_cal + 
+                    3 * l_cal + 
                     0.001 * l_spatial + 
                     0.001 * l_sparsity)
                     
