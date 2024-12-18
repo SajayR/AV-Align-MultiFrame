@@ -104,7 +104,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=12
+            prefetch_factor=6
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -139,10 +139,10 @@ class AudioVisualTrainer:
             ]
         )
         self.optimizer_hubert = torch.optim.AdamW(
-            [{'params': hubert_params, 'lr': 1e-5}]
+            [{'params': hubert_params, 'lr': 6e-5}]
         )
         self.optimizer_vit = torch.optim.AdamW(
-            [{'params': vit_params, 'lr': 1e-5}]
+            [{'params': vit_params, 'lr': 6e-5}]
         )
 
         # Total training steps
@@ -168,13 +168,14 @@ class AudioVisualTrainer:
                 pass
             else:
                 wandb.init(
-                    project="DenseGod",
+                    project="DenseSpeed",
                     name="DenseFudge",
                     config=self.config
                 )
 
         self.vis_samples = self._get_visualization_samples()
-
+        #print("Compiling model in init")
+        #self.needs_initial_compile = True
         if not force_new_training:
             checkpoint_path = self.find_latest_checkpoint()
             if checkpoint_path:
@@ -184,10 +185,11 @@ class AudioVisualTrainer:
         if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
-                project="DenseGod",
+                project="DenseSpeed",
                 name="DenseFudge",
                 config=self.config
             )
+        
 
     def find_latest_checkpoint(self):
         checkpoints = list(self.output_dir.glob('checkpoint_epoch*.pt'))
@@ -273,13 +275,13 @@ class AudioVisualTrainer:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
-                    project="DenseGod",
+                    project="DenseSpeed",
                     id=wandb_run_id,
                     resume="must"
                 )
             else:
                 wandb.init(
-                    project="DenseGod",
+                    project="DenseSpeed",
                     name=f"DenseFudge",
                     config=self.config
                 )
@@ -292,7 +294,7 @@ class AudioVisualTrainer:
             # If we had passed the unfreeze epoch and had a scheduler saved
             self.scheduler_hubert = torch.optim.lr_scheduler.OneCycleLR(
                 self.optimizer_hubert,
-                max_lr=1e-5,
+                max_lr=6e-5,
                 total_steps=(self.config['num_epochs'] - self.config['unfreeze_hubert_epoch']) * dataloader_len,
                 pct_start=0.1,
                 div_factor=10,
@@ -304,7 +306,7 @@ class AudioVisualTrainer:
         if (checkpoint.get('scheduler_vit_state_dict') is not None) and (checkpoint['scheduler_vit_state_dict'] is not None):
             self.scheduler_vit = torch.optim.lr_scheduler.OneCycleLR(
                 self.optimizer_vit,
-                max_lr=1e-5,
+                max_lr=6e-5,
                 total_steps=(self.config['num_epochs'] - self.config['unfreeze_vit_epoch']) * dataloader_len,
                 pct_start=0.1,
                 div_factor=10,
@@ -317,7 +319,7 @@ class AudioVisualTrainer:
         self._set_freeze_state(self.start_epoch)
 
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
-        print(f"Best loss so far: {self.best_loss:.4f}")
+        #print(f"Best loss so far: {self.best_loss:.4f}")
 
     def _get_visualization_samples(self):
         batch = next(iter(self.dataloader))
@@ -378,7 +380,7 @@ class AudioVisualTrainer:
         """
 
         dataloader_len = len(self.dataloader)
-
+        #need_recompile = self.needs_initial_compile 
         # If we are past the HuBERT unfreeze epoch
         if current_epoch >= self.config['unfreeze_hubert_epoch']:
             for param in self.model.audio_embedder.hubert.parameters():
@@ -395,6 +397,7 @@ class AudioVisualTrainer:
                     final_div_factor=1e4,
                     anneal_strategy='cos'
                 )
+        #    need_recompile = True
 
         # If we are past the ViT unfreeze epoch
         if current_epoch >= self.config['unfreeze_vit_epoch']:
@@ -412,6 +415,13 @@ class AudioVisualTrainer:
                     final_div_factor=1e4,
                     anneal_strategy='cos'
                 )
+         #   need_recompile = True
+
+        #if need_recompile:
+        #    print("Compiling model..." + 
+        #          " (Initial compile)" if self.needs_initial_compile else " (Recompile after unfreezing)")
+        #    self.model = torch.compile(self.model, mode='max-autotune')
+        #    self.needs_initial_compile = False
 
     def train(self, num_epochs: int = None):
         if num_epochs is not None:
@@ -539,10 +549,10 @@ if __name__ == "__main__":
         num_vis_samples=20,
         gradient_accumulation_steps=1,
         vis_every=5000,
-        num_workers=15,
+        num_workers=16,
         force_new_training=False,
-        unfreeze_hubert_epoch=0,
+        unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
-        save_every_steps=3000
+        save_every_steps=4000
     )
     trainer.train()

@@ -160,7 +160,7 @@ class AudioVisualModel(nn.Module):
         
         # 2. Temperature/Calibration stability using softplus for smoother gradients
         #l_cal = F.softplus(1.0 - self.temperature) + F.softplus(self.temperature - 5.0)
-        l_cal = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
+        l_cal = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 3
         
         # 3. Spatial smoothness using L1 norm
         spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
@@ -174,8 +174,8 @@ class AudioVisualModel(nn.Module):
         l_sparsity = torch.mean(num_high_attn ** 2)  # Polynomial instead of exponential
         
         # Combine with reduced weights
-        reg_loss = (0.01 * l_nonneg + 
-                    3 * l_cal + 
+        reg_loss = (0.1 * l_nonneg + 
+                    6.9 * l_cal + 
                     0.001 * l_spatial + 
                     0.001 * l_sparsity)
                     

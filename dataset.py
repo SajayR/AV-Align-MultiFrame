@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import numpy as np
 import random
@@ -7,169 +7,106 @@ import av
 from typing import Dict, List
 import torch.nn as nn
 import torchaudio.transforms as T
-
 import warnings
 warnings.filterwarnings("ignore")
-#from hubert_processor import extract_audio_from_video
 import multiprocessing
-from tqdm import tqdm
-import torchvision
-multiprocessing.set_start_method('spawn', force=True)
-import av
-import random
+#import dataloader
+from torch.utils.data import DataLoader
+# Attempt to use fork for potentially faster dataloader start
+try:
+    multiprocessing.set_start_method('fork', force=True)
+except:
+    multiprocessing.set_start_method('spawn', force=True)
+
+# Global normalization constants (ImageNet)
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
+
 def extract_audio_from_video(video_path: Path) -> torch.Tensor:
-    """Extract audio from video file and return as tensor."""
+    """Extract entire 1s audio from video."""
     try:
         container = av.open(str(video_path))
         audio = container.streams.audio[0]
         resampler = av.audio.resampler.AudioResampler(format='s16', layout='mono', rate=16000)
         
-        # Read all audio frames
         samples = []
         for frame in container.decode(audio):
             frame.pts = None
             frame = resampler.resample(frame)[0]
             samples.append(frame.to_ndarray().reshape(-1))
-        
+        container.close()
+
         samples = torch.tensor(np.concatenate(samples))
         samples = samples.float() / 32768.0  # Convert to float and normalize
         return samples
     except:
         print(f"Failed to load audio from {video_path}")
-        return torch.zeros(16000)  # Return 1 second of silence
-
-'''def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
-    """Load video and preprocess frames for Cosmos encoder.
-    Returns: tensor of shape [C, T, H, W] ready for Cosmos"""
-    
-    # Load video and get metadata
-    video = torchvision.io.read_video(video_path)
-    frames, _, video_meta = video
-    original_fps = video_meta["video_fps"]
-    #print("original_fps", original_fps)
-    
-    # Calculate frame indices for desired FPS
-    video_duration = len(frames) / original_fps
-    desired_frame_count = int(video_duration * sample_fps)
-    
-    # Sample frames at exact timestamps
-    frame_indices = np.linspace(0, len(frames)-1, desired_frame_count, dtype=int)
-    sampled_frames = frames[frame_indices]
-    
-    # Normalize to [-1, 1]
-    processed_frames = sampled_frames.float() / 255.0 * 2 - 1
-    
-    # Resize frames to 256x256
-    resized_frames = []
-    for frame in processed_frames:
-        resized = torch.nn.functional.interpolate(
-            frame.permute(2, 0, 1).unsqueeze(0),  # [1, C, H, W]
-            size=(256, 256),
-            mode='bilinear',
-            align_corners=False
-        )
-        resized_frames.append(resized.squeeze(0))
-    
-    # Stack frames along time dimension
-    processed_frames = torch.stack(resized_frames, dim=1)  # [C, T, H, W]
-    #print("processed_frames", processed_frames.shape)
-    #taking a random frame
-    processed_frames = processed_frames[:, random.randint(0, processed_frames.shape[1]-1), :, :]
-    print("processed_frames", processed_frames.shape)
-    return processed_frames'''
+        return torch.zeros(16331)
 
 def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
-    """Load video and preprocess frames for DiNO encoder.
-    Returns: tensor of shape [C, T, H, W] ready for DiNO.
-    Changed normalization to ImageNet for DiNO"""
-    
-    # ImageNet stats for normalization
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
-    
-    # Load video and get metadata
-    frames, _, video_meta = torchvision.io.read_video(video_path)
-    original_fps = video_meta["video_fps"]
-    
-    # Calculate frame indices for desired FPS
-    video_duration = len(frames) / original_fps
-    desired_frame_count = int(video_duration * sample_fps)
-    
-    # Sample frames at exact timestamps
-    frame_indices = np.linspace(0, len(frames)-1, desired_frame_count, dtype=int)
-    sampled_frames = frames[frame_indices]
-    
-    # First normalize to [0, 1]
-    processed_frames = sampled_frames.float() / 255.0
-    
-    # Resize frames to 256x256
-    resized_frames = []
-    for frame in processed_frames:
-        resized = torch.nn.functional.interpolate(
-            frame.permute(2, 0, 1).unsqueeze(0),  # [1, C, H, W]
-            size=(224, 224),
-            mode='bilinear',
-            align_corners=False
-        )
-        resized_frames.append(resized.squeeze(0))
-    
-    # Stack frames along time dimension
-    processed_frames = torch.stack(resized_frames, dim=1)  # [C, T, H, W]
-    
-    # Taking a random frame
-    processed_frames = processed_frames[:, random.randint(0, processed_frames.shape[1]-1), :, :]
-    
-    # Apply ImageNet normalization
-    processed_frames = (processed_frames - mean) / std
-    
-    return processed_frames
+    """Load only one random frame from the 1s video using PyAV, resize, and normalize."""
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    # Duration = 1s, get original fps
+    original_fps = float(video_stream.average_rate)
+    video_duration = 1.0
+    num_original_frames = int(round(original_fps * video_duration))
+
+    # Compute frame indices as before
+    desired_frame_count = int(video_duration * sample_fps)  # equals sample_fps
+    frame_indices = np.linspace(0, num_original_frames - 1, desired_frame_count, dtype=int)
+    chosen_index = frame_indices[np.random.randint(0, desired_frame_count)]
+
+    # Calculate PTS for chosen frame
+    chosen_time_seconds = chosen_index / original_fps
+    chosen_pts = int(chosen_time_seconds / video_stream.time_base)
+
+    # Seek and decode that single frame
+    container.seek(chosen_pts, any_frame=False, backward=True, stream=video_stream)
+    decoded_frame = None
+    for frame in container.decode(video_stream):
+        decoded_frame = frame.to_rgb().to_ndarray()
+        break
+    container.close()
+
+    # Convert to tensor, resize, and normalize
+    frame_tensor = torch.from_numpy(decoded_frame).permute(2, 0, 1).float() / 255.0
+    frame_tensor = torch.nn.functional.interpolate(
+        frame_tensor.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False
+    ).squeeze(0)
+    frame_tensor = (frame_tensor - IMAGENET_MEAN) / IMAGENET_STD
+
+    return frame_tensor
 
 class VideoBatchSampler(Sampler):
     def __init__(self, vid_nums: List[int], batch_size: int):
         self.vid_nums = np.array(vid_nums)
         self.batch_size = batch_size
-        
-        # Group indices by vid_num
-        self.vid_to_indices = {}
-        for i, vid in enumerate(vid_nums):
-            if vid not in self.vid_to_indices:
-                self.vid_to_indices[vid] = []
-            self.vid_to_indices[vid].append(i)
-            
-        # Store total number of samples for length calculation
         self.total_samples = len(vid_nums)
-            
+
     def __iter__(self):
-        # Create a list of all indices
         all_indices = list(range(self.total_samples))
         random.shuffle(all_indices)
         
-        # Create batches
         current_batch = []
-        used_vids = set()  # Track videos used in current batch
+        used_vids = set()
         
         for idx in all_indices:
             vid = self.vid_nums[idx]
-            
-            # If this video hasn't been used in current batch
             if vid not in used_vids:
                 current_batch.append(idx)
                 used_vids.add(vid)
-                
-                # If batch is full, yield it
                 if len(current_batch) == self.batch_size:
                     yield current_batch
                     current_batch = []
                     used_vids = set()
         
-        # Don't forget the last batch if it exists
         if current_batch:
             yield current_batch
     
     def __len__(self):
-        # Approximate number of batches
         return self.total_samples // self.batch_size
-
 
 class AudioVisualDataset(Dataset):
     def __init__(self, data_root: str, sample_fps: int = 20):
@@ -177,7 +114,6 @@ class AudioVisualDataset(Dataset):
         self.sample_fps = sample_fps
         self.video_files = sorted(list(self.data_root.glob("*.mp4")))
         
-        # Create vid_num mapping (same as before)
         self.vid_to_files = {}
         for file in self.video_files:
             vid_num = int(file.stem.split('_')[0])
@@ -191,31 +127,28 @@ class AudioVisualDataset(Dataset):
         return len(self.video_files)
 
     def __getitem__(self, idx):
+        video_path = self.video_files[idx]
         try:
-            video_path = self.video_files[idx]
             audio = extract_audio_from_video(video_path)
-            video_frames = load_and_preprocess_video(video_path, self.sample_fps)
+            video_frame = load_and_preprocess_video(str(video_path), self.sample_fps)
             return {
                 'video_path': str(video_path),
-                'video_frames': video_frames, 
+                'video_frames': video_frame, 
                 'audio': audio,
                 'vid_num': int(video_path.stem.split('_')[0]),
                 'segment_num': int(video_path.stem.split('_')[1]),
             }
         except Exception as e:
             print(f"Error processing {self.video_files[idx]}: {str(e)}")
-            # Return a dummy sample with same structure
             return {
                 'video_path': str(self.video_files[idx]),
                 'video_frames': torch.zeros(3, 224, 224),
                 'audio': torch.zeros(16331),
-                'vid_num': -1,  # sentinel value
+                'vid_num': -1,
                 'segment_num': -1
             }
-        
 
 def collate_fn(batch):
-    # Get all tokens (already processed)
     video_tokens = torch.stack([item['video_frames'] for item in batch])
     max_audio_len = max(item['audio'].shape[0] for item in batch)
     audio_padded = torch.zeros(len(batch), max_audio_len)
@@ -228,33 +161,119 @@ def collate_fn(batch):
         'audio': audio_padded,
         'vid_nums': [item['vid_num'] for item in batch],
         'segment_nums': [item['segment_num'] for item in batch],
-        'video_paths': [str(item['video_path']) for item in batch]  # Convert PosixPath to string
+        'video_paths': [str(item['video_path']) for item in batch]
     }
 
 if __name__ == "__main__":
-    # Test dataset and dataloader
-    dataset = AudioVisualDataset("/home/cisco/heyo/densefuck/sound_of_pixels/densetok/densefuckfuckfuck/vggsound_split_1seconds")
-    sampler = VideoBatchSampler(dataset.vid_nums, batch_size=1) 
-    dataloader = DataLoader(
-        dataset, 
-        batch_sampler=sampler,
-        collate_fn=collate_fn,
-        num_workers=0,
-        #persistent_workers=True 
-    )
-    import time
-    # Test a batch
-    for i in range(1):
-        start = time.time()
-        batch = next(iter(dataloader))
-        end = time.time()
-        print(f"Time taken: {end - start} seconds")
-        for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                print(f"{k} shape:", v.shape)
-            else:
-                print(f"{k}:", v)
+    import unittest
+    
+    class DatasetTests(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            # Initialize dataset and dataloader once for all tests
+            cls.dataset = AudioVisualDataset(
+                "/home/cisco/nvmefudge/vggsound_1seconds",  # Update path as needed
+                sample_fps=20
+            )
+            
+            cls.batch_size = 4
+            cls.batch_sampler = VideoBatchSampler(
+                vid_nums=cls.dataset.vid_nums,
+                batch_size=cls.batch_size
+            )
+            
+            cls.dataloader = DataLoader(
+                cls.dataset,
+                batch_sampler=cls.batch_sampler,
+                num_workers=0,
+                collate_fn=collate_fn
+            )
+            
+            # Get one batch for testing
+            cls.batch = next(iter(cls.dataloader))
 
-        for i in batch.items():
-            print(i)
-     
+        def test_batch_structure(self):
+            """Test if batch contains all required keys with correct types"""
+            required_keys = {'frame', 'audio', 'vid_nums', 'segment_nums', 'video_paths'}
+            self.assertEqual(set(self.batch.keys()), required_keys, "Batch missing required keys")
+            
+            # Check types
+            self.assertIsInstance(self.batch['frame'], torch.Tensor, "Frames should be a tensor")
+            self.assertIsInstance(self.batch['audio'], torch.Tensor, "Audio should be a tensor")
+            self.assertIsInstance(self.batch['vid_nums'], list, "Video numbers should be a list")
+            self.assertIsInstance(self.batch['segment_nums'], list, "Segment numbers should be a list")
+            self.assertIsInstance(self.batch['video_paths'], list, "Video paths should be a list")
+            self.assertIsInstance(self.batch['video_paths'][0], str, "Video paths should be strings")
+
+        def test_video_frame_format(self):
+            """Test video frame tensor format and normalization"""
+            frames = self.batch['frame']
+            
+            # Check shape
+            self.assertEqual(len(frames.shape), 4, "Frames should be 4D tensor")
+            self.assertEqual(frames.shape[0], self.batch_size, "Incorrect batch size")
+            self.assertEqual(frames.shape[1], 3, "Frames should have 3 channels")
+            self.assertEqual(frames.shape[2], 224, "Frame height should be 224")
+            self.assertEqual(frames.shape[3], 224, "Frame width should be 224")
+            
+            # Check ImageNet normalization (approximately)
+            means = frames.mean(dim=[0,2,3])
+            stds = frames.std(dim=[0,2,3])
+            
+            # ImageNet normalized data should have approximately these ranges
+            self.assertTrue(torch.all(frames >= -3), "Frames min value out of expected range")
+            self.assertTrue(torch.all(frames <= 3), "Frames max value out of expected range")
+            
+            # Rough check of channel means and stds (should be approximately 0 and 1 after normalization)
+            for i, (mean, std) in enumerate(zip(means, stds)):
+                self.assertGreater(std.item(), 0.1, f"Channel {i} has suspiciously low standard deviation")
+                self.assertLess(abs(mean.item()), 0.5, f"Channel {i} mean too far from 0")
+
+        def test_audio_format(self):
+            """Test audio tensor format and normalization"""
+            audio = self.batch['audio']
+            
+            # Check shape
+            self.assertEqual(len(audio.shape), 2, "Audio should be 2D tensor (batch, time)")
+            self.assertEqual(audio.shape[0], self.batch_size, "Incorrect batch size")
+            
+            # Check normalization
+            self.assertTrue(torch.all(audio >= -1), "Audio values should be >= -1")
+            self.assertTrue(torch.all(audio <= 1), "Audio values should be <= 1")
+            
+            # Check if audio length is reasonable (expect ~1 second at 16kHz)
+            self.assertGreater(audio.shape[1], 15000, "Audio seems too short for 1s at 16kHz")
+            self.assertLess(audio.shape[1], 17000, "Audio seems too long for 1s at 16kHz")
+
+        def test_batch_sampling(self):
+            """Test if VideoBatchSampler provides unique videos per batch"""
+            # Check if all video numbers in batch are unique
+            unique_vids = set(self.batch['vid_nums'])
+            self.assertEqual(len(unique_vids), len(self.batch['vid_nums']), 
+                           "Batch contains duplicate videos")
+            self.assertEqual(len(self.batch['vid_nums']), self.batch_size, 
+                           "Batch size mismatch")
+            
+            # All metadata lists should have same length
+            self.assertEqual(len(self.batch['vid_nums']), len(self.batch['segment_nums']),
+                           "Metadata length mismatch")
+            self.assertEqual(len(self.batch['vid_nums']), len(self.batch['video_paths']),
+                           "Metadata length mismatch")
+
+        def test_video_path_validity(self):
+            """Test if video paths exist and are properly formatted"""
+            for path in self.batch['video_paths']:
+                self.assertTrue(Path(path).exists(), f"Video file does not exist: {path}")
+                self.assertTrue(path.endswith('.mp4'), "Video should be MP4 format")
+                
+                # Check path format matches expected pattern (e.g., "vid_num_segment_num.mp4")
+                filename = Path(path).stem
+                parts = filename.split('_')
+                self.assertEqual(len(parts), 2, "Video filename should have format 'vid_num_segment_num'")
+                self.assertTrue(parts[0].isdigit(), "Video number should be integer")
+                self.assertTrue(parts[1].isdigit(), "Segment number should be integer")
+        
+       
+
+    if __name__ == "__main__":
+        unittest.main(argv=['first-arg-is-ignored'], exit=False)
