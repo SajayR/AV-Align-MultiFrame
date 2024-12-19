@@ -44,13 +44,8 @@ class AudioEmbedder(nn.Module):
         
         # Move to same device as model
         inputs = inputs.to(audio_input.device)
-        #inputs = inputs.squeeze(1)
-        #print(f"Inputs shape: {inputs.shape}")
-        
-        # Get HuBERT features
         
         hubert_output = self.hubert(inputs).last_hidden_state  # (B, T/320, 1024)
-        #print(f"HuBERT output shape: {hubert_output.shape}")
         
         # Project to embedding dimension
         features = self.projection(hubert_output)  # (B, T/320, embedding_dim)
