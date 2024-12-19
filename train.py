@@ -17,9 +17,11 @@ import warnings
 warnings.filterwarnings("ignore")
 import time
 torch.cuda.empty_cache()
+
 def collate_fn(batch):
-    # Get all tokens (already processed)
+    # video_tokens shape will be [batch_size, 10, 3, 224, 224]
     video_tokens = torch.stack([item['video_frames'] for item in batch])
+    
     max_audio_len = max(item['audio'].shape[0] for item in batch)
     audio_padded = torch.zeros(len(batch), max_audio_len)
     for i, item in enumerate(batch):
@@ -27,11 +29,11 @@ def collate_fn(batch):
         audio_padded[i, :audio_len] = item['audio']
     
     return {
-        'frame': video_tokens,
+        'frame': video_tokens,  # Now [B, 10, 3, 224, 224]
         'audio': audio_padded,
         'vid_nums': [item['vid_num'] for item in batch],
         'segment_nums': [item['segment_num'] for item in batch],
-        'video_paths': [str(item['video_path']) for item in batch]  # Convert PosixPath to string
+        'video_paths': [str(item['video_path']) for item in batch]
     }
 
 class AudioVisualTrainer:
