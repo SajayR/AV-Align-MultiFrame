@@ -14,21 +14,15 @@ class ViTEmbedder(nn.Module):
             param.requires_grad = True
             
     def forward(self, x):
-        """
-        Args:
-            x: (batch_size, channels, height, width)
-        Returns:
-            patch_embeddings: (batch_size, num_patches, embedding_dim)
-        """
-        # Get intermediate features
-        x = self.model.get_intermediate_layers(x, n=1)[0]
-        x = self.projection(x)
-        
-        # x now includes both CLS token and patch tokens
-        # Remove CLS token (first token) if you want just patches
-        #patch_tokens = x[:, 1:, :]  # Remove CLS token
-        
-        return x
+        B, T, C, H, W = x.shape
+        # Reshape to treat each frame as a separate batch item
+        x = x.reshape(B * T, C, H, W)
+        # Process through ViT
+        embeddings = self.model.get_intermediate_layers(x, n=1)[0]
+        embeddings = self.projection(embeddings)
+        # Reshape back to separate batch and time dimensions
+        embeddings = embeddings.reshape(B, T, embeddings.shape[1], -1)
+        return embeddings
 
 # Test it out!
 if __name__ == "__main__":
@@ -43,7 +37,7 @@ if __name__ == "__main__":
     print(vit.model)
     
     # Create dummy batch of images
-    batch = torch.randn(4, 3, 224, 224, device="cuda")
+    batch = torch.randn(2, 10, 3, 224, 224, device="cuda")
     
     # Get embeddings
     with torch.no_grad():
@@ -51,5 +45,5 @@ if __name__ == "__main__":
     
     print(f"Input shape: {batch.shape}")
     print(f"Output shape: {embeddings.shape}")
-    # Should output something like: torch.Size([4, 196, 768])
-    # 196 = 14x14 patches, 768 = embedding dimension
+    # Input shape: torch.Size([2, 10, 3, 224, 224])
+    # Output shape: torch.Size([2, 10, 256, 512])
