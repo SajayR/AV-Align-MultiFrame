@@ -125,16 +125,26 @@ class AudioVisualModel(nn.Module):
 
     def compute_regularization_losses(self, clip_sims, token_sims):
         """
-        Stripped down to only working components with temporal structure
+        Regularization with temporal structure
         token_sims shape: [B, B, Na, T, Nv]
         """
-        # Temperature regularization (this works as-is since it's parameter-based)
-        temp_low = torch.clamp(torch.log(torch.tensor(2.3, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 4
-        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 4
-        l_cal = temp_low + temp_high
+        # 1. Non-negative pressure
+        neg_sims = torch.clamp(token_sims, min=-20, max=0)  
+        l_nonneg = torch.mean(neg_sims ** 2)
         
-        # That's all folks! Just temperature for now
-        reg_loss = 8.0 * l_cal
+        # 2. Temperature regularization
+        temp_low = torch.clamp(torch.log(torch.tensor(2.3, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 3
+        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 3
+        l_cal = temp_low + temp_high
+
+        # 3. Temporal smoothness (across frames)
+        # This prevents sudden changes in attention between consecutive frames
+        temporal_diffs = token_sims[..., 1:, :] - token_sims[..., :-1, :]
+        l_temporal = torch.mean(temporal_diffs ** 2)
+        
+        reg_loss = (0.15 * l_nonneg + 
+                    8.0 * l_cal + 
+                    0.01 * l_temporal)
         
         return reg_loss
         
