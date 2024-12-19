@@ -114,44 +114,7 @@ class AudioVisualModel(nn.Module):
         #print("Contrastive loss", contrastive_loss)
         return total_loss
     
-    '''def compute_regularization_losses(self, clip_sims, token_sims):
-        """Compute regularization terms"""
-        
-        # 1. Non-negative pressure - encourage positive evidence
-        neg_sims = torch.clamp(token_sims, max=0)  # Only keep negative similarities
-        l_nonneg = torch.mean(neg_sims ** 2)
-        
-        # 2. Temperature/Calibration stability
-        l_cal = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
-        
-        # 3. Spatial smoothness on attention maps (simplified TV loss)
-        spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
-        l_spatial = torch.mean(spatial_diffs ** 2)
-        
-        # 4. Sparsity loss - encourage focused attention
-        # Normalize attention scores to [0,1] range for each audio token
-        attn_norm = torch.sigmoid(token_sims)  # [B, B, Na, Nv]
-        
-        # Parameters for sparsity control
-        threshold = 0.5  # Attention threshold
-        alpha = 2.0      # Exponential penalty strength
-        
-        # Count patches above threshold with soft thresholding
-        above_threshold = F.relu(attn_norm - threshold)
-        # Sum across visual patches for each audio token
-        num_high_attn = torch.sum(above_threshold, dim=-1)  # [B, B, Na]
-        # Apply exponential penalty
-        l_sparsity = torch.mean(torch.exp(alpha * num_high_attn))
-        
-        # Combine regularization terms
-        reg_loss = (0.01 * l_nonneg + 
-                    0.1 * l_cal + 
-                    0.01 * l_spatial + 
-                    0.01 * l_sparsity)  # Can adjust this weight to control sparsity strength
-                    
-        return reg_loss'''
-    
-    def compute_regularization_losses(self, clip_sims, token_sims):
+        '''def compute_regularization_losses(self, clip_sims, token_sims):
         """Compute regularization terms"""
         
         # 1. Non-negative pressure with clamped range
@@ -160,7 +123,7 @@ class AudioVisualModel(nn.Module):
         
         # 2. Temperature/Calibration stability using softplus for smoother gradients
         #l_cal = F.softplus(1.0 - self.temperature) + F.softplus(self.temperature - 5.0)
-        l_cal = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 3
+        l_cal = torch.clamp(torch.log(torch.tensor(1.1, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 8
         
         # 3. Spatial smoothness using L1 norm
         spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
@@ -175,11 +138,46 @@ class AudioVisualModel(nn.Module):
         
         # Combine with reduced weights
         reg_loss = (0.1 * l_nonneg + 
-                    6.9 * l_cal + 
+                    10 * l_cal + 
                     0.001 * l_spatial + 
                     0.001 * l_sparsity)
                     
-        return reg_loss
+        return reg_loss'''
+
+    def compute_regularization_losses(self, clip_sims, token_sims):
+            # 1. Non-negative pressure (unchanged)
+            neg_sims = torch.clamp(token_sims, min=-20, max=0)  
+            l_nonneg = torch.mean(neg_sims ** 2)
+            
+            # 2. Temperature regularization (fixed to handle both bounds)
+            temp_low = torch.clamp(torch.log(torch.tensor(2.3, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 4
+            temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 4
+            l_cal = temp_low + temp_high
+            
+            # 3. Spatial smoothness only (removed incorrect temporal)
+            spatial_diffs = token_sims[..., 1:] - token_sims[..., :-1]
+            l_spatial = torch.mean(spatial_diffs ** 2)
+            
+            # 4. Sparsity with normalized entropy
+            attn_norm = torch.sigmoid(token_sims)
+            threshold = 0.5
+            above_threshold = F.relu(attn_norm - threshold)
+            num_high_attn = torch.sum(above_threshold, dim=-1)
+            
+            attn_dist = F.softmax(token_sims, dim=-1)
+            entropy = -(attn_dist * torch.log(attn_dist + 1e-10)).sum(dim=-1)
+            # Normalize entropy by maximum possible entropy (log of number of elements)
+            max_entropy = torch.log(torch.tensor(attn_dist.size(-1), dtype=torch.float, device=token_sims.device))
+            normalized_entropy = entropy / max_entropy
+            
+            l_sparsity = torch.mean(num_high_attn ** 2) - 0.1 * torch.mean(normalized_entropy)
+            
+            reg_loss = (0.15 * l_nonneg + 
+                        8.0 * l_cal + 
+                        0.01 * l_spatial +
+                        0.005 * l_sparsity)
+            
+            return reg_loss
         
     def forward(self, frames, audio):
         """

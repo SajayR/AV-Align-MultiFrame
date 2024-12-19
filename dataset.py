@@ -128,6 +128,7 @@ class AudioVisualDataset(Dataset):
             self.vid_to_files[vid_num].append(file)
             
         self.vid_nums = [int(f.stem.split('_')[0]) for f in self.video_files]
+        print("max of vid_nums: ", max(self.vid_nums))
 
     def __len__(self):
         return len(self.video_files)

@@ -16,7 +16,7 @@ import gc
 import warnings
 warnings.filterwarnings("ignore")
 import time
-
+torch.cuda.empty_cache()
 def collate_fn(batch):
     # Get all tokens (already processed)
     video_tokens = torch.stack([item['video_frames'] for item in batch])
@@ -104,7 +104,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=8
+            prefetch_factor=6
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -169,7 +169,7 @@ class AudioVisualTrainer:
             else:
                 wandb.init(
                     project="DenseSpeed",
-                    name="DenseFudge",
+                    name="DenseHack",
                     config=self.config
                 )
 
@@ -185,7 +185,7 @@ class AudioVisualTrainer:
             print("No wandb run found, initializing new run")
             wandb.init(
                 project="DenseSpeed",
-                name="DenseFudge",
+                name="DenseHack",
                 config=self.config
             )
         
@@ -280,7 +280,7 @@ class AudioVisualTrainer:
             else:
                 wandb.init(
                     project="DenseSpeed",
-                    name=f"DenseFudge",
+                    name=f"DenseHack",
                     config=self.config
                 )
 
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         num_vis_samples=20,
         gradient_accumulation_steps=1,
         vis_every=5000,
-        num_workers=16,
+        num_workers=10,
         force_new_training=False,
         unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
