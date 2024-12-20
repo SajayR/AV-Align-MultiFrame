@@ -47,7 +47,7 @@ def extract_audio_from_video(video_path: Path) -> torch.Tensor:
             container.close()
         #gc.collect()
         #torch.cuda.empty_cache()
-
+'''
 def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
     """Load 10 evenly spaced frames from the 1s video."""
     container = av.open(video_path)
@@ -81,6 +81,57 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
             
             frames.append(frame_tensor)
             break
+    
+    container.close()
+    return torch.stack(frames)  # Shape: [10, 3, 224, 224]
+'''
+
+def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
+    """Load 10 evenly spaced frames from the 1s video."""
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    original_fps = float(video_stream.average_rate)
+    video_duration = 1.0
+    num_original_frames = int(round(original_fps * video_duration))
+    frame_indices = np.linspace(0, num_original_frames - 1, 10, dtype=int)
+    
+    frames = []
+    for chosen_index in frame_indices:
+        # Calculate PTS for chosen frame
+        chosen_time_seconds = chosen_index / original_fps
+        chosen_pts = int(chosen_time_seconds / video_stream.time_base)
+
+        # Seek to slightly before our target
+        container.seek(chosen_pts, stream=video_stream, any_frame=False, backward=True)
+        
+        # Keep track of closest frame
+        closest_frame = None
+        min_pts_diff = float('inf')
+        
+        # Decode frames until we find the closest one to our target PTS
+        for frame in container.decode(video_stream):
+            pts_diff = abs(frame.pts - chosen_pts)
+            
+            if pts_diff < min_pts_diff:
+                min_pts_diff = pts_diff
+                closest_frame = frame
+            
+            # If we've gone too far past our target, stop
+            if frame.pts > chosen_pts + original_fps/10:  # Allow 1/10th second overshoot
+                break
+        
+        if closest_frame is not None:
+            decoded_frame = closest_frame.to_rgb().to_ndarray()
+            frame_tensor = torch.from_numpy(decoded_frame).permute(2, 0, 1).float() / 255.0
+            frame_tensor = torch.nn.functional.interpolate(
+                frame_tensor.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False
+            ).squeeze(0)
+            frame_tensor = (frame_tensor - IMAGENET_MEAN) / IMAGENET_STD
+            frames.append(frame_tensor)
+        else:
+            print(f"Failed to find appropriate frame for index {chosen_index}")
+            # Could potentially add a fallback here if needed
     
     container.close()
     return torch.stack(frames)  # Shape: [10, 3, 224, 224]

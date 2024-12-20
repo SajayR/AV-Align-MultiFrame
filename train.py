@@ -116,8 +116,10 @@ class AudioVisualTrainer:
             param.requires_grad = False
 
         # Separate parameter groups
+        # Separate parameter groups
         projection_params = []
         temperature_params = []
+        threshold_params = []
         hubert_params = []
         vit_params = []
 
@@ -130,16 +132,17 @@ class AudioVisualTrainer:
                 projection_params.append(param)
             elif "temperature" in name:
                 temperature_params.append(param)
+            elif "threshold" in name:
+                threshold_params.append(param)
             else:
-                projection_params.append(param)
+                print(f"Uncategorized parameter: {name}")  # Debug print
 
-        # Create separate optimizers
-        self.optimizer_projection = torch.optim.AdamW(
-            [
-                {'params': projection_params, 'lr': 1e-3},
-                {'params': temperature_params, 'lr': 1e-3},
-            ]
-        )
+        # Create separate optimizers with clear parameter groups
+        self.optimizer_projection = torch.optim.AdamW([
+            {'params': projection_params, 'lr': 1e-3},
+            {'params': temperature_params, 'lr': 1e-3},
+            {'params': threshold_params, 'lr': 5e-4}
+        ])
         self.optimizer_hubert = torch.optim.AdamW(
             [{'params': hubert_params, 'lr': 8e-5}]
         )
@@ -170,7 +173,7 @@ class AudioVisualTrainer:
                 pass
             else:
                 wandb.init(
-                    project="DenseSpeed",
+                    project="DenseVid",
                     name="DenseHack",
                     config=self.config
                 )
@@ -186,7 +189,7 @@ class AudioVisualTrainer:
         if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
-                project="DenseSpeed",
+                project="DenseVid",
                 name="DenseHack",
                 config=self.config
             )
@@ -275,13 +278,13 @@ class AudioVisualTrainer:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
-                    project="DenseSpeed",
+                    project="DenseVid",
                     id=wandb_run_id,
                     resume="must"
                 )
             else:
                 wandb.init(
-                    project="DenseSpeed",
+                    project="DenseVid",
                     name=f"DenseHack",
                     config=self.config
                 )
@@ -307,8 +310,8 @@ class AudioVisualTrainer:
                 self.optimizer_vit,
                 max_lr=6e-5,
                 total_steps=(self.config['num_epochs'] - self.config['unfreeze_vit_epoch']) * dataloader_len,
-                pct_start=0.1,
-                div_factor=10,
+                pct_start=0.2,
+                div_factor=100,
                 final_div_factor=1e4,
                 anneal_strategy='cos'
             )
@@ -332,7 +335,9 @@ class AudioVisualTrainer:
     def create_visualization(self, epoch: int, step: int):
         try:
             fig, axes = plt.subplots(self.num_vis_samples, 5, figsize=(20, 4*self.num_vis_samples))
+            print("Plotting attention snapshots")
             for i in range(self.num_vis_samples):
+                print(f"Plotting attention snapshot {i}")
                 self.visualizer.plot_attention_snapshot(
                     self.model,
                     self.vis_samples['frames'][i:i+1],
@@ -397,7 +402,7 @@ class AudioVisualTrainer:
                     max_lr=1e-5,
                     total_steps=steps_remaining_vit,
                     pct_start=0.1,
-                    div_factor=10,
+                    div_factor=100,
                     final_div_factor=1e4,
                     anneal_strategy='cos'
                 )
@@ -439,12 +444,29 @@ class AudioVisualTrainer:
             #else:
             #    pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
-
+            batch_idx = 0
             for batch in pbar:
                 self.model.train()
+                # Add this debugging code temporarily in the training loop
+                if batch_idx == 0:  # First batch of epoch
+                    old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
+
+                if batch_idx == 4:  # Second batch
+                    for name, param in self.model.named_parameters():
+                        if param.requires_grad:
+                            if torch.all(param == old_params[name]):
+                                print(f"Parameter {name} didn't update!")
+                batch_idx += 1
                 frames = batch['frame'].to(self.device)
                 audio = batch['audio'].to(self.device)
-                loss = self.model(frames, audio)
+                #print(frames.shape)
+                #print(audio.shape)
+                loss, contrastive_loss, reg_loss, fraction_selected = self.model(frames, audio)
+
+                if self.use_wandb:
+                    wandb.log({
+                        "fraction_selected": fraction_selected.item()
+                    })
 
                 if loss.item() > 10:
                     print(f"Skipping batch with loss: {loss.item():.4f}")
@@ -452,6 +474,10 @@ class AudioVisualTrainer:
 
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
+                # After loss.backward()
+                #for name, param in self.model.named_parameters():
+                    #if param.requires_grad:
+                    #    print(f"{name}: grad norm = {param.grad.norm().item() if param.grad is not None else 'No grad!'}")
                 
                 accumulation_counter += 1
 
@@ -473,6 +499,8 @@ class AudioVisualTrainer:
                         self.optimizer_vit.zero_grad()
 
                 loss_value = loss.item() * self.gradient_accumulation_steps
+                contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
+                reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
                 epoch_losses.append(loss_value)
                 pbar.set_postfix({'loss': f'{loss_value:.4f}'})
 
@@ -480,7 +508,11 @@ class AudioVisualTrainer:
                     log_dict = {
                         "train_loss": loss_value,
                         "projection_lr": self.optimizer_projection.param_groups[0]['lr'],
-                        "temperature": self.model.temperature.item()
+                        "temperature": self.model.temperature.item(),
+                        "raw_threshold": self.model.threshold.item(),
+                        "threshold": torch.sigmoid(self.model.threshold).item(),
+                        "contrastive_loss": contrastive_loss_value,
+                        "reg_loss": reg_loss_value
                     }
                     if epoch >= self.config['unfreeze_hubert_epoch']:
                         log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
@@ -530,18 +562,18 @@ class AudioVisualTrainer:
 if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cisco/nvmefudge/vggsound_1seconds',
-        output_dir='./outputs',
-        batch_size=48,
-        num_epochs=100,
+        output_dir='./vid_outputs',
+        batch_size=11,
+        num_epochs=50,
         learning_rate=8e-4,
         use_wandb=True,
-        num_vis_samples=20,
-        gradient_accumulation_steps=1,
-        vis_every=5000,
-        num_workers=10,
+        num_vis_samples=10,
+        gradient_accumulation_steps=4,
+        vis_every=3000,
+        num_workers=12,
         force_new_training=False,
         unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
-        save_every_steps=4000
+        save_every_steps=2000
     )
     trainer.train()

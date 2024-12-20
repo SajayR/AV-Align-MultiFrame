@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.0, initial_threshold=0.8):
+    def __init__(self, temperature=2.5, initial_threshold=-4.0): #sigmoid(-3.9) = 0.022
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -75,8 +75,11 @@ class AudioVisualModel(nn.Module):
         
         # Average over audio tokens
         clip_similarities = token_similarities.mean(dim=-1)
-        
-        return clip_similarities
+        #print(f"Max visual similarities range: {max_visual_similarities.min():.3f} to {max_visual_similarities.max():.3f}")
+        #print(f"Current threshold: {threshold:.3f}")
+        #print(f"Fraction of frames selected: {selection_mask.float().mean():.3f}")
+        fraction_selected = selection_mask.float().mean()
+        return clip_similarities, fraction_selected
     
     def compute_all_similarities(self, audio_feats, visual_feats):
         """
@@ -95,11 +98,11 @@ class AudioVisualModel(nn.Module):
         similarities = similarities / self.temperature
         
         # Aggregate using threshold-based temporal selection
-        clip_similarities = self.aggregate_temporal_similarities(similarities)
+        clip_similarities, fraction_selected = self.aggregate_temporal_similarities(similarities)
         
-        return clip_similarities, similarities
+        return clip_similarities, similarities, fraction_selected
 
-    def compute_contrastive_loss(self, clip_similarities, token_sims):
+    def compute_contrastive_loss(self, clip_similarities, token_sims, fraction_selected):
         """Compute InfoNCE loss with regularization"""
         batch_size = clip_similarities.shape[0]
         labels = torch.arange(batch_size).to(clip_similarities.device)
@@ -121,7 +124,7 @@ class AudioVisualModel(nn.Module):
         total_loss = contrastive_loss + reg_loss
         #print("Regularization loss", reg_loss)
         #print("Contrastive loss", contrastive_loss)
-        return total_loss
+        return total_loss, contrastive_loss, reg_loss, fraction_selected
 
     def compute_regularization_losses(self, clip_sims, token_sims):
         """
@@ -133,18 +136,21 @@ class AudioVisualModel(nn.Module):
         l_nonneg = torch.mean(neg_sims ** 2)
         
         # 2. Temperature regularization
-        temp_low = torch.clamp(torch.log(torch.tensor(2.3, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 3
+        temp_low = torch.clamp(torch.log(torch.tensor(2.5, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
         temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 3
         l_cal = temp_low + temp_high
 
         # 3. Temporal smoothness (across frames)
         # This prevents sudden changes in attention between consecutive frames
-        temporal_diffs = token_sims[..., 1:, :] - token_sims[..., :-1, :]
-        l_temporal = torch.mean(temporal_diffs ** 2)
+       # temporal_diffs = token_sims[..., 1:, :] - token_sims[..., :-1, :]
+       # l_temporal = torch.mean(temporal_diffs ** 2)
+
+        threshold = torch.sigmoid(self.threshold)
+        l_threshold = torch.clamp(threshold - 0.9, min=0)**2 + torch.clamp(0.1 - threshold, min=0)**2
         
         reg_loss = (0.15 * l_nonneg + 
-                    8.0 * l_cal + 
-                    0.01 * l_temporal)
+                    8.0 * l_cal +
+                    0.1 * l_threshold)
         
         return reg_loss
         
@@ -162,8 +168,8 @@ class AudioVisualModel(nn.Module):
         
         if self.training:
             # Compute similarities and loss
-            clip_sims, token_sims = self.compute_all_similarities(audio_feats, visual_feats)
-            return self.compute_contrastive_loss(clip_sims, token_sims)
+            clip_sims, token_sims, fraction_selected = self.compute_all_similarities(audio_feats, visual_feats)
+            return self.compute_contrastive_loss(clip_sims, token_sims, fraction_selected)
         else:
             # During inference, just get temporal similarity matrix
             similarities = self.compute_temporal_similarity_matrix(audio_feats, visual_feats)
