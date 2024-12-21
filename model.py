@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.5, initial_threshold=-4.0, scale_factor=9.0): #sigmoid(-3.9) = 0.022
+    def __init__(self, temperature=2.5, initial_threshold=-4.0, scale_factor=9.0): #sigmoid(-4.0) = 0.018
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -129,9 +129,20 @@ class AudioVisualModel(nn.Module):
         # Add regularization
         reg_loss = self.compute_regularization_losses(clip_similarities, token_sims)
         
-        total_loss = contrastive_loss + reg_loss
+
+        threshold = torch.sigmoid(self.threshold)
+        max_visual_similarities = torch.max(token_sims, dim=-1)[0]  # [B, B, Na, T]
+        raw_diff = max_visual_similarities - threshold
         
-        return total_loss, contrastive_loss, reg_loss, fraction_selected
+        # Compute selection ratio loss for positive pairs only
+        positive_diffs = raw_diff[torch.arange(batch_size), torch.arange(batch_size)]  # [Na, T]
+        binary_ish = torch.tanh(20 * positive_diffs)
+        selection_ratio = (binary_ish + 1) / 2
+        selection_reward = -0.1 * torch.log1p(selection_ratio.mean())  # 0.1 is alpha
+        
+        total_loss = 2.5*selection_reward + contrastive_loss + reg_loss
+
+        return total_loss, contrastive_loss, reg_loss, fraction_selected, 2.5*selection_reward
 
     def compute_regularization_losses(self, clip_sims, token_sims):
         """
@@ -143,8 +154,8 @@ class AudioVisualModel(nn.Module):
         l_nonneg = torch.mean(neg_sims ** 2)
         
         # 2. Temperature regularization
-        temp_low = torch.clamp(torch.log(torch.tensor(1.5, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
-        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 3
+        temp_low = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
+        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 2
         l_cal = temp_low + temp_high
 
         threshold = torch.sigmoid(self.threshold)
@@ -153,7 +164,7 @@ class AudioVisualModel(nn.Module):
         l_scale = torch.clamp(self.scale_factor - 20.0, min=0)**2 + torch.clamp(1.0 - self.scale_factor, min=0)**2
         
         reg_loss = (0.15 * l_nonneg + 
-                    8.0 * l_cal +
+                    2.0 * l_cal +
                     0.1 * l_threshold +
                     0.1 * l_scale)
         

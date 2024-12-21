@@ -106,7 +106,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=2
+            prefetch_factor=6
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -176,8 +176,8 @@ class AudioVisualTrainer:
                 pass
             else:
                 wandb.init(
-                    project="DenseVid_fix",
-                    name="DenseHack",
+                    project="DenseVid",
+                    name="DenseGod",
                     config=self.config
                 )
 
@@ -192,8 +192,8 @@ class AudioVisualTrainer:
         if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
-                project="DenseVid_fix",
-                name="DenseHack",
+                project="DenseVid",
+                name="DenseGod",
                 config=self.config
             )
         
@@ -281,14 +281,14 @@ class AudioVisualTrainer:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
-                    project="DenseVid_fix",
-                   # id=wandb_run_id,
-                    #resume="must"
+                    project="DenseVid",
+                    id=wandb_run_id,
+                    resume="must"
                 )
             else:
                 wandb.init(
-                    project="DenseVid_fix",
-                    name=f"DenseHack",
+                    project="DenseVid",
+                    name=f"DenseGod",
                     config=self.config
                 )
 
@@ -447,7 +447,7 @@ class AudioVisualTrainer:
                 audio = batch['audio'].to(self.device)
                 #print(frames.shape)
                 #print(audio.shape)
-                loss, contrastive_loss, reg_loss, fraction_selected = self.model(frames, audio)
+                loss, contrastive_loss, reg_loss, fraction_selected, selection_reward = self.model(frames, audio)
 
                 if self.use_wandb:
                     wandb.log({
@@ -487,6 +487,7 @@ class AudioVisualTrainer:
                     loss_value = loss.item() * self.gradient_accumulation_steps
                     contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
                     reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
+                    selection_reward_value = selection_reward.item() * self.gradient_accumulation_steps
                     epoch_losses.append(loss_value)
                     pbar.set_postfix({'loss': f'{loss_value:.4f}'})
 
@@ -499,7 +500,8 @@ class AudioVisualTrainer:
                             "scale_factor": self.model.scale_factor.item(),
                             "threshold": torch.sigmoid(self.model.threshold).item(),
                             "contrastive_loss": contrastive_loss_value,
-                            "reg_loss": reg_loss_value
+                            "reg_loss": reg_loss_value,
+                            "selection_reward_value": selection_reward_value
                         }
                         if epoch >= self.config['unfreeze_hubert_epoch']:
                             log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
@@ -513,6 +515,13 @@ class AudioVisualTrainer:
                         log_dict["epoch"] = epoch
                         log_dict["step"] = self.global_step
                         wandb.log(log_dict)
+
+                        #for name, param in self.model.named_parameters():
+                           # if param.requires_grad:
+                              #  if torch.all(param == old_params[name]):
+                                   # print(f"Parameter {name} didn't update!")
+                
+                        #old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
                 del frames, audio, loss
                 torch.cuda.empty_cache()
@@ -529,12 +538,7 @@ class AudioVisualTrainer:
                 if self.global_step % self.save_every_steps == 0 and self.global_step > 0:
                     self.save_checkpoint(epoch, self.global_step)
 
-                for name, param in self.model.named_parameters():
-                        if param.requires_grad:
-                            if torch.all(param == old_params[name]):
-                                print(f"Parameter {name} didn't update!")
                 
-                old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
                 self.global_step += 1
 
@@ -561,11 +565,11 @@ if __name__ == "__main__":
         num_epochs=50,
         learning_rate=8e-4,
         use_wandb=True,
-        num_vis_samples=1,
-        gradient_accumulation_steps=1,
+        num_vis_samples=11,
+        gradient_accumulation_steps=4,
         vis_every=3000,
         num_workers=12,
-        force_new_training=True,
+        force_new_training=False,
         unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
         save_every_steps=2000
