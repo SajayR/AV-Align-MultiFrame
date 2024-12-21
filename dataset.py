@@ -129,7 +129,7 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
             ).squeeze(0)
             frame_tensor = (frame_tensor - IMAGENET_MEAN) / IMAGENET_STD
             frames.append(frame_tensor)
-            print(f"  Selected frame with PTS={closest_frame.pts}")
+            #print(f"  Selected frame with PTS={closest_frame.pts}")
         else:
             print(f"Failed to find appropriate frame for index {chosen_index}")
             # Could potentially add a fallback here if needed
