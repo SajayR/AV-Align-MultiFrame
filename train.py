@@ -106,7 +106,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=6
+            prefetch_factor=2
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -122,7 +122,7 @@ class AudioVisualTrainer:
         threshold_params = []
         hubert_params = []
         vit_params = []
-
+        scale_factor_params = []
         for name, param in self.model.named_parameters():
             if "audio_embedder.hubert" in name:
                 hubert_params.append(param)
@@ -134,6 +134,8 @@ class AudioVisualTrainer:
                 temperature_params.append(param)
             elif "threshold" in name:
                 threshold_params.append(param)
+            elif "scale_factor" in name:
+                scale_factor_params.append(param)
             else:
                 print(f"Uncategorized parameter: {name}")  # Debug print
 
@@ -141,7 +143,8 @@ class AudioVisualTrainer:
         self.optimizer_projection = torch.optim.AdamW([
             {'params': projection_params, 'lr': 1e-3},
             {'params': temperature_params, 'lr': 1e-3},
-            {'params': threshold_params, 'lr': 5e-4}
+            {'params': threshold_params, 'lr': 1e-3},
+            {'params': scale_factor_params, 'lr': 1e-3}
         ])
         self.optimizer_hubert = torch.optim.AdamW(
             [{'params': hubert_params, 'lr': 8e-5}]
@@ -173,7 +176,7 @@ class AudioVisualTrainer:
                 pass
             else:
                 wandb.init(
-                    project="DenseVid",
+                    project="DenseVid_fix",
                     name="DenseHack",
                     config=self.config
                 )
@@ -189,7 +192,7 @@ class AudioVisualTrainer:
         if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
-                project="DenseVid",
+                project="DenseVid_fix",
                 name="DenseHack",
                 config=self.config
             )
@@ -278,13 +281,13 @@ class AudioVisualTrainer:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
-                    project="DenseVid",
-                    id=wandb_run_id,
-                    resume="must"
+                    project="DenseVid_fix",
+                   # id=wandb_run_id,
+                    #resume="must"
                 )
             else:
                 wandb.init(
-                    project="DenseVid",
+                    project="DenseVid_fix",
                     name=f"DenseHack",
                     config=self.config
                 )
@@ -429,20 +432,6 @@ class AudioVisualTrainer:
                 if param.requires_grad:
                     print(f"  {name}")
 
-            # Determine if we need to skip batches due to checkpoint resume
-            #steps_done_in_current_epoch = self.global_step - (epoch * dataloader_len)
-            #if steps_done_in_current_epoch < 0:
-            #    steps_done_in_current_epoch = 0
-
-            #if steps_done_in_current_epoch > 0 and steps_done_in_current_epoch < dataloader_len:
-            #    print("Initializing dataloader iterator")
-            #    dataloader_iter = iter(self.dataloader)
-            #    print(f"Skipping {steps_done_in_current_epoch} steps")
-            #    for _ in tqdm(range(steps_done_in_current_epoch), desc="Skipping steps"):
-            #        next(dataloader_iter)
-            #    pbar = tqdm(dataloader_iter, desc=f'Epoch {epoch}', initial=steps_done_in_current_epoch, total=dataloader_len)
-            #else:
-            #    pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             batch_idx = 0
             for batch in pbar:
@@ -451,11 +440,8 @@ class AudioVisualTrainer:
                 if batch_idx == 0:  # First batch of epoch
                     old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
-                if batch_idx == 4:  # Second batch
-                    for name, param in self.model.named_parameters():
-                        if param.requires_grad:
-                            if torch.all(param == old_params[name]):
-                                print(f"Parameter {name} didn't update!")
+                
+                    
                 batch_idx += 1
                 frames = batch['frame'].to(self.device)
                 audio = batch['audio'].to(self.device)
@@ -476,8 +462,8 @@ class AudioVisualTrainer:
                 loss.backward()
                 # After loss.backward()
                 #for name, param in self.model.named_parameters():
-                    #if param.requires_grad:
-                    #    print(f"{name}: grad norm = {param.grad.norm().item() if param.grad is not None else 'No grad!'}")
+                #    if param.requires_grad:
+                #        print(f"{name}: grad norm = {param.grad.norm().item() if param.grad is not None else 'No grad!'}")
                 
                 accumulation_counter += 1
 
@@ -498,34 +484,35 @@ class AudioVisualTrainer:
                         self.scheduler_vit.step()
                         self.optimizer_vit.zero_grad()
 
-                loss_value = loss.item() * self.gradient_accumulation_steps
-                contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
-                reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
-                epoch_losses.append(loss_value)
-                pbar.set_postfix({'loss': f'{loss_value:.4f}'})
+                    loss_value = loss.item() * self.gradient_accumulation_steps
+                    contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
+                    reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
+                    epoch_losses.append(loss_value)
+                    pbar.set_postfix({'loss': f'{loss_value:.4f}'})
 
-                if self.use_wandb:
-                    log_dict = {
-                        "train_loss": loss_value,
-                        "projection_lr": self.optimizer_projection.param_groups[0]['lr'],
-                        "temperature": self.model.temperature.item(),
-                        "raw_threshold": self.model.threshold.item(),
-                        "threshold": torch.sigmoid(self.model.threshold).item(),
-                        "contrastive_loss": contrastive_loss_value,
-                        "reg_loss": reg_loss_value
-                    }
-                    if epoch >= self.config['unfreeze_hubert_epoch']:
-                        log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
-                    else:
-                        log_dict["hubert_lr"] = 0
-                    if epoch >= self.config['unfreeze_vit_epoch']:
-                        log_dict["vit_lr"] = self.optimizer_vit.param_groups[0]['lr']
-                    else:
-                        log_dict["vit_lr"] = 0
-                    
-                    log_dict["epoch"] = epoch
-                    log_dict["step"] = self.global_step
-                    wandb.log(log_dict)
+                    if self.use_wandb:
+                        log_dict = {
+                            "train_loss": loss_value,
+                            "projection_lr": self.optimizer_projection.param_groups[0]['lr'],
+                            "temperature": self.model.temperature.item(),
+                            "raw_threshold": self.model.threshold.item(),
+                            "scale_factor": self.model.scale_factor.item(),
+                            "threshold": torch.sigmoid(self.model.threshold).item(),
+                            "contrastive_loss": contrastive_loss_value,
+                            "reg_loss": reg_loss_value
+                        }
+                        if epoch >= self.config['unfreeze_hubert_epoch']:
+                            log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
+                        else:
+                            log_dict["hubert_lr"] = 0
+                        if epoch >= self.config['unfreeze_vit_epoch']:
+                            log_dict["vit_lr"] = self.optimizer_vit.param_groups[0]['lr']
+                        else:
+                            log_dict["vit_lr"] = 0
+                        
+                        log_dict["epoch"] = epoch
+                        log_dict["step"] = self.global_step
+                        wandb.log(log_dict)
 
                 del frames, audio, loss
                 torch.cuda.empty_cache()
@@ -539,8 +526,15 @@ class AudioVisualTrainer:
                     plt.close('all')
                     gc.collect()
 
-                if self.global_step % self.save_every_steps == 0:
+                if self.global_step % self.save_every_steps == 0 and self.global_step > 0:
                     self.save_checkpoint(epoch, self.global_step)
+
+                for name, param in self.model.named_parameters():
+                        if param.requires_grad:
+                            if torch.all(param == old_params[name]):
+                                print(f"Parameter {name} didn't update!")
+                
+                old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
                 self.global_step += 1
 
@@ -567,11 +561,11 @@ if __name__ == "__main__":
         num_epochs=50,
         learning_rate=8e-4,
         use_wandb=True,
-        num_vis_samples=10,
-        gradient_accumulation_steps=4,
+        num_vis_samples=1,
+        gradient_accumulation_steps=1,
         vis_every=3000,
         num_workers=12,
-        force_new_training=False,
+        force_new_training=True,
         unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
         save_every_steps=2000

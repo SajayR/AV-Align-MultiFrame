@@ -10,13 +10,14 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.5, initial_threshold=-4.0): #sigmoid(-3.9) = 0.022
+    def __init__(self, temperature=2.5, initial_threshold=-4.0, scale_factor=9.0): #sigmoid(-3.9) = 0.022
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
         self.audio_embedder = AudioEmbedder()
         self.temperature = nn.Parameter(torch.tensor(temperature))
         # Add learnable threshold
+        self.scale_factor = nn.Parameter(torch.tensor(scale_factor)) ## add to optimizer
         self.threshold = nn.Parameter(torch.tensor(initial_threshold))
         
         # Unfreeze the HuBERT model
@@ -51,13 +52,14 @@ class AudioVisualModel(nn.Module):
     
     def aggregate_temporal_similarities(self, similarities):
         """
-        Aggregate temporal similarities using learned threshold
+        Aggregate temporal similarities using learned threshold with smooth selection
         
         Args:
             similarities: (B, Na, T, Nv) or (B, B, Na, T, Nv)
-            
+                
         Returns:
             clip_similarities: (B) or (B, B)
+            fraction_selected: Mean of selection strengths for monitoring
         """
         # Use sigmoid to keep threshold between 0 and 1
         threshold = torch.sigmoid(self.threshold)
@@ -65,20 +67,26 @@ class AudioVisualModel(nn.Module):
         # Max pool over visual dimension
         max_visual_similarities = torch.max(similarities, dim=-1)[0]
         
-        # Apply threshold
-        selection_mask = (max_visual_similarities >= threshold).float()
-        masked_similarities = max_visual_similarities * selection_mask
+        # Compute smooth selection weights
+        raw_diff = max_visual_similarities - threshold
         
-        # Average over selected frames
-        selected_counts = selection_mask.sum(dim=-1)  # [B, B, Na] or [B, Na]
-        token_similarities = masked_similarities.sum(dim=-1) / selected_counts.clamp(min=1)
+        selection_strength = F.softplus(F.relu(raw_diff) * self.scale_factor)
+       
+        masked_similarities = max_visual_similarities * selection_strength
+        
+        # Compute weighted average over frames
+        weighted_sum = masked_similarities.sum(dim=-1)
+        weights_sum = selection_strength.sum(dim=-1)
+        token_similarities = weighted_sum / weights_sum
         
         # Average over audio tokens
         clip_similarities = token_similarities.mean(dim=-1)
-        #print(f"Max visual similarities range: {max_visual_similarities.min():.3f} to {max_visual_similarities.max():.3f}")
-        #print(f"Current threshold: {threshold:.3f}")
-        #print(f"Fraction of frames selected: {selection_mask.float().mean():.3f}")
-        fraction_selected = selection_mask.float().mean()
+        
+        # Track average selection strength
+        #fraction_selected = selection_strength.mean()
+        passed_threshold = (raw_diff > 0).float()
+        fraction_selected = passed_threshold.mean()
+        
         return clip_similarities, fraction_selected
     
     def compute_all_similarities(self, audio_feats, visual_feats):
@@ -122,8 +130,7 @@ class AudioVisualModel(nn.Module):
         reg_loss = self.compute_regularization_losses(clip_similarities, token_sims)
         
         total_loss = contrastive_loss + reg_loss
-        #print("Regularization loss", reg_loss)
-        #print("Contrastive loss", contrastive_loss)
+        
         return total_loss, contrastive_loss, reg_loss, fraction_selected
 
     def compute_regularization_losses(self, clip_sims, token_sims):
@@ -140,17 +147,15 @@ class AudioVisualModel(nn.Module):
         temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 3
         l_cal = temp_low + temp_high
 
-        # 3. Temporal smoothness (across frames)
-        # This prevents sudden changes in attention between consecutive frames
-       # temporal_diffs = token_sims[..., 1:, :] - token_sims[..., :-1, :]
-       # l_temporal = torch.mean(temporal_diffs ** 2)
-
         threshold = torch.sigmoid(self.threshold)
         l_threshold = torch.clamp(threshold - 0.9, min=0)**2 + torch.clamp(0.1 - threshold, min=0)**2
+
+        l_scale = torch.clamp(self.scale_factor - 20.0, min=0)**2 + torch.clamp(1.0 - self.scale_factor, min=0)**2
         
         reg_loss = (0.15 * l_nonneg + 
                     8.0 * l_cal +
-                    0.1 * l_threshold)
+                    0.1 * l_threshold +
+                    0.1 * l_scale)
         
         return reg_loss
         
