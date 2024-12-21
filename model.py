@@ -136,7 +136,7 @@ class AudioVisualModel(nn.Module):
         l_nonneg = torch.mean(neg_sims ** 2)
         
         # 2. Temperature regularization
-        temp_low = torch.clamp(torch.log(torch.tensor(2.5, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
+        temp_low = torch.clamp(torch.log(torch.tensor(1.5, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
         temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 3
         l_cal = temp_low + temp_high
 
