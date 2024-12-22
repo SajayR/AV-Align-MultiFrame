@@ -262,6 +262,9 @@ class AudioVisualTrainer:
         self.best_loss = checkpoint['best_loss']
         self.config.update(checkpoint.get('config', {}))
         
+        ### if want to update the config manually
+        self.config['save_every_steps'] = 20000
+        self.config['vis_every'] = 25000
 
         self.optimizer_projection.load_state_dict(checkpoint['optimizer_projection_state_dict'])
         if checkpoint.get('scheduler_projection_state_dict') is not None:

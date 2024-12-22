@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.5, initial_threshold=-4.0, scale_factor=9.0): #sigmoid(-4.0) = 0.018
+    def __init__(self, temperature=2.5, initial_threshold=-2.5, scale_factor=9.0): #sigmoid(-2.5) = 0.08
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -140,9 +140,9 @@ class AudioVisualModel(nn.Module):
         selection_ratio = (binary_ish + 1) / 2
         selection_reward = -0.1 * torch.log1p(selection_ratio.mean())  # 0.1 is alpha
         
-        total_loss = 2.5*selection_reward + contrastive_loss + reg_loss
+        total_loss = selection_reward + contrastive_loss + reg_loss  # 2.5 selection = 1/4 of contrastive loss, 1/10
 
-        return total_loss, contrastive_loss, reg_loss, fraction_selected, 2.5*selection_reward
+        return total_loss, contrastive_loss, reg_loss, fraction_selected, selection_reward
 
     def compute_regularization_losses(self, clip_sims, token_sims):
         """
