@@ -426,7 +426,10 @@ class AudioVisualTrainer:
         accumulation_counter = 0
         total_epochs = self.config['num_epochs']
         dataloader_len = len(self.dataloader)
-
+        def format_param_count(count):
+            if count > 1_000_000:
+                return f"{count/1_000_000:.2f}M"
+            return f"{count:,}"
         for epoch in range(self.start_epoch, total_epochs):
             # Ensure freeze/unfreeze state is correct for this epoch
             self._set_freeze_state(epoch)
@@ -440,6 +443,8 @@ class AudioVisualTrainer:
             for name, param in self.model.named_parameters():
                 if param.requires_grad:
                     print(f"  {name}")
+
+            print(f"Number of trainable parameters: {format_param_count(sum(p.numel() for p in self.model.parameters() if p.requires_grad))}")
 
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             batch_idx = 0
@@ -496,7 +501,7 @@ class AudioVisualTrainer:
                     loss_value = loss.item() * self.gradient_accumulation_steps
                     contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
                     reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
-                    selection_reward_value = selection_reward.item() * self.gradient_accumulation_steps
+                    #selection_reward_value = selection_reward.item() * self.gradient_accumulation_steps
                     epoch_losses.append(loss_value)
                     pbar.set_postfix({'loss': f'{loss_value:.4f}'})
 
@@ -510,7 +515,7 @@ class AudioVisualTrainer:
                             "threshold": torch.sigmoid(self.model.threshold).item(),
                             "contrastive_loss": contrastive_loss_value,
                             "reg_loss": reg_loss_value,
-                            "selection_reward_value": selection_reward_value
+                            #"selection_reward_value": selection_reward_value
                         }
                         if epoch >= self.config['unfreeze_hubert_epoch']:
                             log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
@@ -571,17 +576,17 @@ if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cisco/nvmefudge/vggsound_1seconds',
         output_dir='./vid_outputs',
-        batch_size=10,
+        batch_size=12,
         num_epochs=50,
         learning_rate=8e-4,
-        use_wandb=True,
-        num_vis_samples=10,
+        use_wandb=False,
+        num_vis_samples=1,
         gradient_accumulation_steps=4,
         vis_every=30000,
         num_workers=10,
         force_new_training=True,
-        unfreeze_hubert_epoch=2,
-        unfreeze_vit_epoch=5,
+        unfreeze_hubert_epoch=0,
+        unfreeze_vit_epoch=0,
         save_every_steps=20000
     )
     trainer.train()
