@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.5, initial_threshold=-2.5, scale_factor=9.0): #sigmoid(-2.5) = 0.08
+    def __init__(self, temperature=2.5, initial_threshold=-2.5, scale_factor=2.5): #sigmoid(-2.5) = 0.08
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
@@ -70,16 +70,18 @@ class AudioVisualModel(nn.Module):
         # Compute smooth selection weights
         raw_diff = max_visual_similarities - threshold
         
-        selection_strength = F.softplus(F.relu(raw_diff) * self.scale_factor)
+        selection_strength = F.relu(raw_diff) * self.scale_factor #dont think we need the softplus, relu is enough
        
         masked_similarities = max_visual_similarities * selection_strength
-        
-        # Compute weighted average over frames
+         
+        # Compute weighted average over frames, this seems extremely wrong
         weighted_sum = masked_similarities.sum(dim=-1)
         weights_sum = selection_strength.sum(dim=-1)
-        token_similarities = weighted_sum / weights_sum
+        token_similarities = weighted_sum / weights_sum.clamp(min=1e-6)
         
-        # Average over audio tokens
+        #token similarities should have a max of 1 and min of 0, shit does not
+        #assert token_similarities.max() <= 1 and token_similarities.min() >= 0, "Token similarities should have a max of 1 and min of 0"
+        # Average over audio tokens 
         clip_similarities = token_similarities.mean(dim=-1)
         
         # Track average selection strength

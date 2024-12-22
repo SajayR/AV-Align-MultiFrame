@@ -64,6 +64,7 @@ class AudioVisualTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.model = AudioVisualModel().to(device)
         self.save_every_steps = save_every_steps
+
         
         self.config = {
             'batch_size': batch_size,
@@ -77,6 +78,7 @@ class AudioVisualTrainer:
             'unfreeze_vit_epoch': unfreeze_vit_epoch,
             'save_every_steps': save_every_steps
         }
+        assert self.config['num_vis_samples'] <= self.config['batch_size'], "Number of visualization samples should be less than or equal to batch size"
 
         logging.basicConfig(
             filename=str(self.output_dir / 'training.log'),
@@ -106,7 +108,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=6
+            prefetch_factor=4
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -142,9 +144,9 @@ class AudioVisualTrainer:
         # Create separate optimizers with clear parameter groups
         self.optimizer_projection = torch.optim.AdamW([
             {'params': projection_params, 'lr': 1e-3},
-            {'params': temperature_params, 'lr': 1e-3},
-            {'params': threshold_params, 'lr': 1e-3},
-            {'params': scale_factor_params, 'lr': 1e-3}
+            {'params': temperature_params, 'lr': 3e-4},
+            {'params': threshold_params, 'lr': 3e-4},
+            {'params': scale_factor_params, 'lr': 3e-4}
         ])
         self.optimizer_hubert = torch.optim.AdamW(
             [{'params': hubert_params, 'lr': 8e-5}]
@@ -256,15 +258,13 @@ class AudioVisualTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
-
+        
         self.start_epoch = checkpoint['epoch']
         self.global_step = checkpoint['step']
         self.best_loss = checkpoint['best_loss']
         self.config.update(checkpoint.get('config', {}))
         
         ### if want to update the config manually
-        self.config['save_every_steps'] = 20000
-        self.config['vis_every'] = 25000
 
         self.optimizer_projection.load_state_dict(checkpoint['optimizer_projection_state_dict'])
         if checkpoint.get('scheduler_projection_state_dict') is not None:
@@ -272,7 +272,7 @@ class AudioVisualTrainer:
 
         self.optimizer_hubert.load_state_dict(checkpoint['optimizer_hubert_state_dict'])
         self.optimizer_vit.load_state_dict(checkpoint['optimizer_vit_state_dict'])
-
+        
         if 'vis_samples' in checkpoint:
             self.vis_samples = {
                 'frames': checkpoint['vis_samples']['frames'].to(self.device),
@@ -327,7 +327,7 @@ class AudioVisualTrainer:
         self._set_freeze_state(self.start_epoch)
 
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
-
+        
     def _get_visualization_samples(self):
         batch = next(iter(self.dataloader))
         indices = torch.randperm(len(batch['frame']))[:self.num_vis_samples]
@@ -379,9 +379,15 @@ class AudioVisualTrainer:
         finally:
             plt.close('all')
             torch.cuda.empty_cache()
-
+    
     def _set_freeze_state(self, current_epoch: int):
         dataloader_len = len(self.dataloader)
+        #printing number of trainable parameters
+        def format_param_count(count):
+            if count > 1_000_000:
+                return f"{count/1_000_000:.2f}M"
+            return f"{count:,}"
+        print(f"Number of trainable parameters: {format_param_count(sum(p.numel() for p in self.model.parameters() if p.requires_grad))}")
         
         if current_epoch >= self.config['unfreeze_hubert_epoch']:
             for param in self.model.audio_embedder.hubert.parameters():
@@ -527,10 +533,11 @@ class AudioVisualTrainer:
                         #old_params = {name: param.clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
                 del frames, audio, loss
-                torch.cuda.empty_cache()
+                #torch.cuda.empty_cache()
 
                 if self.global_step % 500 == 0:
                     gc.collect()
+                    torch.cuda.empty_cache()
 
                 if self.global_step % self.vis_every == 0:
                     with torch.no_grad():
@@ -564,17 +571,17 @@ if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cisco/nvmefudge/vggsound_1seconds',
         output_dir='./vid_outputs',
-        batch_size=11,
+        batch_size=10,
         num_epochs=50,
         learning_rate=8e-4,
         use_wandb=True,
-        num_vis_samples=11,
+        num_vis_samples=10,
         gradient_accumulation_steps=4,
-        vis_every=3000,
-        num_workers=12,
-        force_new_training=False,
+        vis_every=30000,
+        num_workers=10,
+        force_new_training=True,
         unfreeze_hubert_epoch=2,
         unfreeze_vit_epoch=5,
-        save_every_steps=2000
+        save_every_steps=20000
     )
     trainer.train()
