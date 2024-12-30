@@ -8,7 +8,7 @@ class AudioEmbedder(nn.Module):
         
         # Load pretrained HuBERT and processor
         self.processor = AutoProcessor.from_pretrained("facebook/hubert-large-ls960-ft")
-        self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960") #model name: facebook/hubert-large-ls960-ft
+        self.hubert = HubertModel.from_pretrained("ntu-spml/distilhubert")#("facebook/hubert-base-ls960") #model name: facebook/hubert-large-ls960-ft
         
         # Project HuBERT features (1024 for large model) to desired embedding dimension
         self.projection = nn.Linear(768, embedding_dim)  
@@ -51,3 +51,15 @@ class AudioEmbedder(nn.Module):
         features = self.projection(hubert_output)  # (B, T/320, embedding_dim)
         
         return features
+
+
+
+if __name__ == "__main__":
+    audio_embedder = AudioEmbedder()
+    total_params = sum(p.numel() for p in audio_embedder.parameters())
+    print(f"Total parameters: {total_params:,}")
+    test_audio = torch.randn(1, 16331)
+    print(test_audio.shape)
+    features = audio_embedder(test_audio)
+    print(features.shape)
+    

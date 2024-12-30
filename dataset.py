@@ -24,6 +24,7 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
 
 def extract_audio_from_video(video_path: Path) -> torch.Tensor:
     """Extract entire 1s audio from video."""
+    #print("extracting audio from video")
     try:
         container = av.open(str(video_path))
         audio = container.streams.audio[0]
@@ -43,50 +44,14 @@ def extract_audio_from_video(video_path: Path) -> torch.Tensor:
         print(f"Failed to load audio from {video_path}")
         return torch.zeros(16331)
     finally:
+        #print("extracted audio from video")
         if container:
             container.close()
         #gc.collect()
         #torch.cuda.empty_cache()
-'''
-def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
-    """Load 10 evenly spaced frames from the 1s video."""
-    container = av.open(video_path)
-    video_stream = container.streams.video[0]
-
-    # Duration = 1s, get original fps
-    original_fps = float(video_stream.average_rate)
-    video_duration = 1.0
-    num_original_frames = int(round(original_fps * video_duration))
-
-    # Get 10 evenly spaced frame indices
-    frame_indices = np.linspace(0, num_original_frames - 1, 10, dtype=int)
-    
-    frames = []
-    for chosen_index in frame_indices:
-        # Calculate PTS for chosen frame
-        chosen_time_seconds = chosen_index / original_fps
-        chosen_pts = int(chosen_time_seconds / video_stream.time_base)
-
-        # Seek and decode that frame
-        container.seek(chosen_pts, any_frame=False, backward=True, stream=video_stream)
-        for frame in container.decode(video_stream):
-            decoded_frame = frame.to_rgb().to_ndarray()
-            
-            # Convert to tensor, resize, and normalize
-            frame_tensor = torch.from_numpy(decoded_frame).permute(2, 0, 1).float() / 255.0
-            frame_tensor = torch.nn.functional.interpolate(
-                frame_tensor.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False
-            ).squeeze(0)
-            frame_tensor = (frame_tensor - IMAGENET_MEAN) / IMAGENET_STD
-            
-            frames.append(frame_tensor)
-            break
-    
-    container.close()
-    return torch.stack(frames)  # Shape: [10, 3, 224, 224]
-'''
 
 def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
+    #print("loading and preprocessing video")
     """Load 10 evenly spaced frames from the 1s video."""
     container = av.open(video_path)
     video_stream = container.streams.video[0]
@@ -94,8 +59,8 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
     original_fps = float(video_stream.average_rate)
     video_duration = 1.0
     num_original_frames = int(round(original_fps * video_duration))
-    frame_indices = np.linspace(0, num_original_frames - 1, 10, dtype=int)
-    
+    frame_indices = np.linspace(0, num_original_frames - 1, 3, dtype=int)
+
     frames = []
     for chosen_index in frame_indices:
         # Calculate PTS for chosen frame
@@ -104,23 +69,23 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
 
         # Seek to slightly before our target
         container.seek(chosen_pts, stream=video_stream, any_frame=False, backward=True)
-        
+
         # Keep track of closest frame
         closest_frame = None
         min_pts_diff = float('inf')
-        
+
         # Decode frames until we find the closest one to our target PTS
         for frame in container.decode(video_stream):
             pts_diff = abs(frame.pts - chosen_pts)
-            
+
             if pts_diff < min_pts_diff:
                 min_pts_diff = pts_diff
                 closest_frame = frame
-            
+
             # If we've gone too far past our target, stop
             if frame.pts > chosen_pts + original_fps/10:  # Allow 1/10th second overshoot
                 break
-        
+
         if closest_frame is not None:
             decoded_frame = closest_frame.to_rgb().to_ndarray()
             frame_tensor = torch.from_numpy(decoded_frame).permute(2, 0, 1).float() / 255.0
@@ -129,11 +94,11 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
             ).squeeze(0)
             frame_tensor = (frame_tensor - IMAGENET_MEAN) / IMAGENET_STD
             frames.append(frame_tensor)
-            #print(f"  Selected frame with PTS={closest_frame.pts}")
+            #print(f"  Selected frame with PTS={closest_frame.pts}") #goes upto about 12-14k
         else:
             print(f"Failed to find appropriate frame for index {chosen_index}")
             # Could potentially add a fallback here if needed
-    
+    #print("Loaded and preprocessed video")
     container.close()
     return torch.stack(frames)  # Shape: [10, 3, 224, 224]
 
@@ -226,13 +191,13 @@ def collate_fn(batch):
         'video_paths': [str(item['video_path']) for item in batch]
     }
 
-if __name__ == "__main__":
-    from torch.utils.data import DataLoader
+#if __name__ == "__main__":
+    '''from torch.utils.data import DataLoader
     from tqdm import tqdm
     import matplotlib.pyplot as plt
 
     dataset = AudioVisualDataset(
-        data_root="/home/cisco/nvmefudge/vggsound_1seconds",
+        data_root="/home/cis/VGGSound_Splits",
         sample_fps=20
     )
 
@@ -263,7 +228,7 @@ if __name__ == "__main__":
         frames = frames * IMAGENET_STD.unsqueeze(0) + IMAGENET_MEAN.unsqueeze(0)
         
         plt.figure(figsize=(20, 4))
-        for i in range(10):
+        for i in range(3):
             plt.subplot(1, 10, i+1)
             plt.imshow(frames[i].permute(1, 2, 0).clip(0, 1))
             plt.axis('off')
@@ -271,4 +236,4 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig('frame_visualization.png')
         plt.close()
-        break  # Just test one batch
+        break  # Just test one batch'''

@@ -14,8 +14,8 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
 class AudioVisualizer:
     def __init__(self, output_resolution=(1920, 1080)):
         self.output_res = output_resolution
-        self.frame_width = output_resolution[0] // 5
-        self.frame_height = (output_resolution[1] - 100) // 2
+        self.frame_width = output_resolution[0] // 3
+        self.frame_height = (output_resolution[1] - 100)
         self.positions = self._calculate_frame_positions()
         
         # Create custom colormap
@@ -29,11 +29,12 @@ class AudioVisualizer:
 
     def _calculate_frame_positions(self):
         positions = []
-        for row in range(2):
-            for col in range(5):
-                x = col * self.frame_width
-                y = row * self.frame_height
-                positions.append((x, y))
+        # Center the 3 frames horizontally
+        frame_spacing = (self.output_res[0] - (3 * self.frame_width)) // 4  # Equal spacing between frames
+        for i in range(3):
+            x = frame_spacing + i * (self.frame_width + frame_spacing)
+            y = (self.output_res[1] - self.frame_height) // 2  # Center vertically
+            positions.append((x, y))
         return positions
 
     def extract_frames_from_video(self, video_path: str) -> torch.Tensor:
@@ -49,7 +50,7 @@ class AudioVisualizer:
         
         original_fps = float(video_stream.average_rate)
         num_original_frames = int(round(original_fps * 1.0))  # 1s duration
-        frame_indices = np.linspace(0, num_original_frames - 1, 10, dtype=int)
+        frame_indices = np.linspace(0, num_original_frames - 1, 3, dtype=int)
         print(f"\nCalculated frame indices: {frame_indices}")
         
         frames = []
@@ -161,8 +162,6 @@ class AudioVisualizer:
         model.eval()
         with torch.no_grad():
             # Get attention maps for each audio token
-            #print("Frames shape during make_attention_video:", frames.shape)
-            #print("Audio shape during make_attention_video:", audio.shape)
             visual_feats = model.visual_embedder(frames)    # [1, T, Nv, D]
             audio_feats = model.audio_embedder(audio)      # [1, Na, D]
             
@@ -173,7 +172,7 @@ class AudioVisualizer:
             
             # Process each frame
             processed_frames = []
-            for i in range(frames.shape[1]):  # For each of the 10 frames
+            for i in range(frames.shape[1]):  
                 frame = frames[0, i]  # [C, H, W]
                 # Denormalize
                 frame_np = frame.permute(1,2,0).cpu().numpy()
@@ -203,14 +202,16 @@ class AudioVisualizer:
                 # Add each frame with its attention map
                 for i, (x, y) in enumerate(self.positions):
                     frame = processed_frames[i]
-                    attn = similarities[t, i].reshape(16, 16).cpu().numpy()  # Assuming 14x14 patches
+                    attn = similarities[t, i].reshape(16, 16).cpu().numpy()
                     overlay = self._create_frame_overlay(frame, attn)
                     canvas[y:y+self.frame_height, x:x+self.frame_width] = overlay
                 
                 # Add progress bar
                 self._draw_progress_bar(canvas, t / num_audio_tokens)
                 
-                writer.write(canvas)
+                # Convert RGB to BGR for OpenCV video writing
+                canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+                writer.write(canvas_bgr)
             
             writer.release()
 
@@ -320,7 +321,7 @@ from pathlib import Path
 
 if __name__ == "__main__":
     # Initialize visualizer
-    visualizer = TemporalVisualizer()
+    visualizer = AudioVisualizer()
     
     # Path to a test video (1-second clip)
     video_path = "/home/cisco/nvmefudge/vggsound_1seconds/0_2.mp4"  # Update with your path

@@ -108,7 +108,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=4
+            prefetch_factor=6
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -179,7 +179,7 @@ class AudioVisualTrainer:
             else:
                 wandb.init(
                     project="DenseVid",
-                    name="DenseGod",
+                    name="DenseSmol",
                     config=self.config
                 )
 
@@ -195,7 +195,7 @@ class AudioVisualTrainer:
             print("No wandb run found, initializing new run")
             wandb.init(
                 project="DenseVid",
-                name="DenseGod",
+                name="DenseSmol",
                 config=self.config
             )
         
@@ -279,22 +279,24 @@ class AudioVisualTrainer:
                 'audios': checkpoint['vis_samples']['audios'].to(self.device),
                 'video_paths': checkpoint['vis_samples']['video_paths']
             }
-        
+        '''
         if self.use_wandb:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
                     project="DenseVid",
-                    id=wandb_run_id,
-                    resume="must"
+                    name=f"DenseSmol",  
+                    config=self.config,
+                    #id=wandb_run_id,
+                    #resume="must"
                 )
             else:
                 wandb.init(
                     project="DenseVid",
-                    name=f"DenseGod",
+                    name=f"DenseSmol",
                     config=self.config
                 )
-
+        ''' 
         current_epoch = self.start_epoch
         dataloader_len = len(self.dataloader)
 
@@ -323,7 +325,7 @@ class AudioVisualTrainer:
             )
             self.scheduler_vit.load_state_dict(checkpoint['scheduler_vit_state_dict'])
 
-        # Ensure freeze states are correct after loading
+        # Ensure freeze states are correct after loading'''
         self._set_freeze_state(self.start_epoch)
 
         print(f"Resumed from epoch {self.start_epoch} (step {self.global_step})")
@@ -574,19 +576,19 @@ class AudioVisualTrainer:
 
 if __name__ == "__main__":
     trainer = AudioVisualTrainer(
-        video_dir='/home/cisco/nvmefudge/vggsound_1seconds',
+        video_dir='/home/cis/VGGSound_Splits',
         output_dir='./vid_outputs',
-        batch_size=12,
+        batch_size=32,
         num_epochs=50,
         learning_rate=8e-4,
-        use_wandb=False,
-        num_vis_samples=1,
-        gradient_accumulation_steps=4,
-        vis_every=30000,
-        num_workers=10,
-        force_new_training=True,
+        use_wandb=True,
+        num_vis_samples=20,
+        gradient_accumulation_steps=2,
+        vis_every=15000,
+        num_workers=16,
+        force_new_training=False,
         unfreeze_hubert_epoch=0,
         unfreeze_vit_epoch=0,
-        save_every_steps=20000
+        save_every_steps=10000
     )
     trainer.train()
